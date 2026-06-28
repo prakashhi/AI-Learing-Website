@@ -1,16 +1,4 @@
-/**
- * TaskFlow AI - Zod Validators
- * Centralized input validation schemas
- */
-
 import { z } from "zod";
-import {
-  Priority,
-  ProjectStatus,
-  TaskStatus,
-  ResourceType,
-  Mood,
-} from "@/types";
 
 // Auth Validators
 export const LoginSchema = z.object({
@@ -30,80 +18,68 @@ export const RegisterSchema = z
     path: ["confirmPassword"],
   });
 
-// Goal Validators
-export const CreateGoalSchema = z.object({
-  title: z.string().min(3, "Title must be at least 3 characters").max(100),
-  description: z.string().max(500).optional(),
-  targetDate: z.string().datetime().optional(),
-  priority: z.enum(["HIGH", "MEDIUM", "LOW"]),
-  progress: z.number().int().min(0).max(100).default(0),
+// Book Upload Validator
+export const UploadBookSchema = z.object({
+  title: z.string().min(1, "Title is required").max(200),
+  author: z.string().max(200).optional(),
+}).passthrough();
+
+// UserBook Validator
+export const UpdateUserBookSchema = z.object({
+  currentChapterIndex: z.number().int().min(0).optional(),
+  learningMode: z.enum(["BEGINNER", "STUDENT", "INTERVIEW", "ADVANCED"]).optional(),
+  learningGoal: z.string().max(500).optional(),
+  dailyStudyMinutes: z.number().int().min(5).max(480).optional(),
+  completed: z.boolean().optional(),
 });
 
-export const UpdateGoalSchema = CreateGoalSchema.partial();
-
-// Project Validators
-export const CreateProjectSchema = z.object({
-  goalId: z.string().uuid("Invalid goal ID"),
-  title: z.string().min(3, "Title must be at least 3 characters").max(100),
-  description: z.string().max(500).optional(),
-  status: z.enum(["PENDING", "IN_PROGRESS", "COMPLETED"]).default("PENDING"),
+// Chat Validator
+export const ChatMessageSchema = z.object({
+  message: z.string().min(1, "Message is required").max(5000),
+  bookId: z.string().uuid("Invalid book ID"),
+  chapterId: z.string().uuid("Invalid chapter ID").optional(),
 });
 
-export const UpdateProjectSchema = CreateProjectSchema.partial();
-
-// Task Validators
-export const CreateTaskSchema = z.object({
-  projectId: z.string().uuid("Invalid project ID"),
-  title: z.string().min(3, "Title must be at least 3 characters").max(100),
-  description: z.string().max(500).optional(),
-  dueDate: z.string().datetime().optional(),
-  status: z.enum(["PENDING", "IN_PROGRESS", "COMPLETED"]).default("PENDING"),
-  priority: z.enum(["HIGH", "MEDIUM", "LOW"]).default("MEDIUM"),
-  completed: z.boolean().default(false),
+// Quiz Validators
+export const GenerateQuizSchema = z.object({
+  bookId: z.string().uuid("Invalid book ID"),
+  chapterId: z.string().uuid("Invalid chapter ID"),
+  questionTypes: z.array(z.enum(["MCQ", "SHORT_ANSWER", "CODING", "SCENARIO"])).min(1).optional(),
+  count: z.number().int().min(1).max(20).default(5),
 });
 
-export const UpdateTaskSchema = CreateTaskSchema.partial();
-
-export const ToggleTaskSchema = z.object({
-  taskId: z.string().uuid("Invalid task ID"),
-  completed: z.boolean(),
+export const QuizSubmitSchema = z.object({
+  quizId: z.string().uuid("Invalid quiz ID"),
+  answers: z.array(z.any()).min(1, "Answers are required"),
 });
 
-// Resource Validators
-export const CreateResourceSchema = z
-  .object({
-    type: z.enum(["LINK", "NOTE", "ARTICLE", "VIDEO"]),
-    title: z.string().min(3, "Title must be at least 3 characters").max(200),
-    description: z.string().max(1000).optional(),
-    url: z.string().url("Invalid URL").optional(),
-  })
-
-export const UpdateResourceSchema = CreateResourceSchema.refine(
-    (data) => {
-      // URL is required for LINK, ARTICLE, VIDEO
-      if (["LINK", "ARTICLE", "VIDEO"].includes(data.type)) {
-        return !!data.url;
-      }
-      return true;
-    },
-    {
-      message: "URL is required for this resource type",
-      path: ["url"],
-    },
-);
-
-// export const UpdateResourceSchema = ResourceSchema.partial();
-
-// Daily Log Validators
-export const CreateDailyLogSchema = z.object({
-  date: z.string().datetime(),
-  learned: z.string().min(1, "What did you learn?").max(1000),
-  hourStudied: z.number().min(0).max(24).default(0),
-  notes: z.string().max(1000).optional(),
-  mood: z.enum(["HAPPY", "NEUTRAL", "TIRED", "FRUSTRATED", "EXCITED"]),
+// Flashcard Validators
+export const ReviewFlashcardSchema = z.object({
+  flashcardId: z.string().uuid("Invalid flashcard ID"),
+  quality: z.number().int().min(0).max(5),
 });
 
-export const UpdateDailyLogSchema = CreateDailyLogSchema.partial();
+// Note Validator
+export const CreateNoteSchema = z.object({
+  bookId: z.string().uuid("Invalid book ID"),
+  chapterId: z.string().uuid("Invalid chapter ID"),
+  content: z.string().min(1, "Content is required").max(5000),
+  type: z.enum(["NOTE", "HIGHLIGHT", "BOOKMARK"]).default("NOTE"),
+  pageRef: z.string().max(100).optional(),
+});
+
+// Book Search Validator
+export const BookSearchSchema = z.object({
+  bookId: z.string().uuid("Invalid book ID"),
+  query: z.string().min(1, "Search query is required").max(200),
+  limit: z.number().int().min(1).max(50).default(10),
+});
+
+// Revision Validator
+export const RevisionCompleteSchema = z.object({
+  scheduleId: z.string().uuid("Invalid schedule ID"),
+  score: z.number().int().min(0).max(100).optional(),
+});
 
 // Pagination
 export const PaginationSchema = z.object({
@@ -111,31 +87,22 @@ export const PaginationSchema = z.object({
   limit: z.number().int().positive().max(100).default(50),
 });
 
-// Search & Filter
+// General Search
 export const SearchSchema = z.object({
-  query: z.string().max(100).optional(),
+  query: z.string().max(200).optional(),
   page: z.number().int().positive().default(1),
   limit: z.number().int().positive().max(100).default(50),
 });
 
-export const FilterSchema = z.object({
-  priority: z.enum(["HIGH", "MEDIUM", "LOW"]).optional(),
-  status: z.string().optional(),
-  type: z.enum(["LINK", "NOTE", "ARTICLE", "VIDEO"]).optional(),
-  page: z.number().int().positive().default(1),
-  limit: z.number().int().positive().max(100).default(50),
-});
-
-// Type exports for use in server actions
+// Type exports
 export type LoginInput = z.infer<typeof LoginSchema>;
 export type RegisterInput = z.infer<typeof RegisterSchema>;
-export type CreateGoalInput = z.infer<typeof CreateGoalSchema>;
-export type UpdateGoalInput = z.infer<typeof UpdateGoalSchema>;
-export type CreateProjectInput = z.infer<typeof CreateProjectSchema>;
-export type UpdateProjectInput = z.infer<typeof UpdateProjectSchema>;
-export type CreateTaskInput = z.infer<typeof CreateTaskSchema>;
-export type UpdateTaskInput = z.infer<typeof UpdateTaskSchema>;
-export type CreateResourceInput = z.infer<typeof CreateResourceSchema>;
-export type UpdateResourceInput = z.infer<typeof UpdateResourceSchema>;
-export type CreateDailyLogInput = z.infer<typeof CreateDailyLogSchema>;
-export type UpdateDailyLogInput = z.infer<typeof UpdateDailyLogSchema>;
+export type UploadBookInput = z.infer<typeof UploadBookSchema>;
+export type UpdateUserBookInput = z.infer<typeof UpdateUserBookSchema>;
+export type ChatMessageInput = z.infer<typeof ChatMessageSchema>;
+export type GenerateQuizInput = z.infer<typeof GenerateQuizSchema>;
+export type QuizSubmitInput = z.infer<typeof QuizSubmitSchema>;
+export type ReviewFlashcardInput = z.infer<typeof ReviewFlashcardSchema>;
+export type CreateNoteInput = z.infer<typeof CreateNoteSchema>;
+export type BookSearchInput = z.infer<typeof BookSearchSchema>;
+export type RevisionCompleteInput = z.infer<typeof RevisionCompleteSchema>;

@@ -1,123 +1,187 @@
-/**
- * TaskFlow AI - Domain Types
- * Centralized TypeScript type definitions for all entities
- */
-
 // User Types
 export type User = {
   id: string;
   email: string;
   name: string | null;
   image: string | null;
-  emailVerified: boolean;
+  emailVerified: string | null;
   createdAt: Date;
   updatedAt: Date;
 };
 
-// Goal Types
-export type Priority = "HIGH" | "MEDIUM" | "LOW";
-export type GoalStatus = "ACTIVE" | "COMPLETED" | "ARCHIVED";
+// Book Types
+export type BookStatus = "PROCESSING" | "READY" | "ERROR";
 
-export type Goal = {
+export type Book = {
   id: string;
   userId: string;
   title: string;
-  description: string;
-  targetDate: Date | null;
-  priority: Priority;
-  progress: number; // 0-100
-  status: GoalStatus;
+  author: string | null;
+  fileType: string;
+  fileUrl: string;
+  status: BookStatus;
+  totalChapters: number;
   createdAt: Date;
   updatedAt: Date;
 };
 
-// Project Types
-export type ProjectStatus = "PENDING" | "IN_PROGRESS" | "COMPLETED";
-
-export type Project = {
+// BookChapter Types
+export type BookChapter = {
   id: string;
-  goalId: string;
-  userId: string;
+  bookId: string;
+  index: number;
   title: string;
-  description: string;
-  status: ProjectStatus;
+  content: string;
+  embedding: number[] | null;
+  summary: string | null;
+  keyPoints: any;
   createdAt: Date;
   updatedAt: Date;
 };
 
-// Task Types
-export type TaskStatus = "PENDING" | "IN_PROGRESS" | "COMPLETED";
+// UserBook Types
+export type LearningMode = "BEGINNER" | "STUDENT" | "INTERVIEW" | "ADVANCED";
 
-export type Task = {
+export type UserBook = {
   id: string;
-  projectId: string;
   userId: string;
-  title: string;
-  description: string;
-  dueDate: Date | null;
-  status: TaskStatus;
-  priority: Priority;
+  bookId: string;
+  currentChapterIndex: number;
+  learningMode: LearningMode;
+  learningGoal: string | null;
+  dailyStudyMinutes: number;
   completed: boolean;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+// LearningSession Types
+export type SessionType = "LESSON" | "QUIZ" | "REVISION" | "CHAT";
+
+export type LearningSession = {
+  id: string;
+  userId: string;
+  bookId: string;
+  chapterId: string;
+  duration: number;
+  type: SessionType;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+// Quiz Types
+export type QuestionType = "MCQ" | "SHORT_ANSWER" | "CODING" | "SCENARIO";
+
+export type Quiz = {
+  id: string;
+  bookId: string;
+  chapterId: string;
+  type: QuestionType;
+  questions: any;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+// QuizAttempt Types
+export type QuizAttempt = {
+  id: string;
+  userId: string;
+  quizId: string;
+  score: number;
+  totalQuestions: number;
+  answers: any;
+  feedback: any;
+  weakTopics: any;
+  strongTopics: any;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+// Flashcard Types
+export type Flashcard = {
+  id: string;
+  userId: string;
+  bookId: string;
+  chapterId: string;
+  front: string;
+  back: string;
+  difficulty: number;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+// FlashcardReview Types
+export type FlashcardReview = {
+  id: string;
+  flashcardId: string;
+  userId: string;
+  easeFactor: number;
+  interval: number;
+  repetitions: number;
+  nextReviewAt: Date;
+  lastReviewedAt: Date;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+// ConversationMessage Types
+export type MessageRole = "USER" | "AI";
+
+export type ConversationMessage = {
+  id: string;
+  userId: string;
+  bookId: string;
+  chapterId: string | null;
+  role: MessageRole;
+  content: string;
+  metadata: any;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+// UserNote Types
+export type NoteType = "NOTE" | "HIGHLIGHT" | "BOOKMARK";
+
+export type UserNote = {
+  id: string;
+  userId: string;
+  bookId: string;
+  chapterId: string;
+  content: string;
+  type: NoteType;
+  pageRef: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+// RevisionSchedule Types
+export type RevisionSchedule = {
+  id: string;
+  userId: string;
+  bookId: string;
+  chapterId: string;
+  scheduledAt: Date;
   completedAt: Date | null;
+  interval: number;
   createdAt: Date;
   updatedAt: Date;
 };
 
-// Resource Types
-export type ResourceType = "LINK" | "NOTE" | "ARTICLE" | "VIDEO";
-
-export type Resource = {
-  id: string;
-  userId: string;
-  type: ResourceType;
-  title: string;
-  description: string;
-  url: string | null;
-  createdAt: Date;
-  updatedAt: Date;
-};
-
-// Daily Log Types
-export type Mood = "HAPPY" | "NEUTRAL" | "TIRED" | "FRUSTRATED" | "EXCITED";
-
-export type DailyLog = {
-  id: string;
-  userId: string;
-  date: Date;
-  learned: string;
-  hourStudied: number;
-  notes: string;
-  mood: Mood;
-  createdAt: Date;
-  updatedAt: Date;
-};
-
-// Streak Types
-export type Streak = {
-  id: string;
-  userId: string;
-  currentStreak: number;
-  longestStreak: number;
-  lastActivityDate: Date | null;
-  createdAt: Date;
-  updatedAt: Date;
-};
-
-// AI Question Types
-export type AICategory =
-  | "DAILY_QUESTION"
-  | "RECOMMENDATION"
-  | "REVIEW"
-  | "ROADMAP";
-
-export type AIQuestion = {
-  id: string;
-  userId: string;
-  question: string;
-  answer: string | null;
-  category: AICategory;
-  createdAt: Date;
-  updatedAt: Date;
+// Dashboard Types
+export type LearningStats = {
+  totalBooks: number;
+  activeBook: string | null;
+  currentChapter: string | null;
+  overallProgress: number;
+  completedChapters: number;
+  remainingChapters: number;
+  dailyGoalMinutes: number;
+  studyStreak: number;
+  quizAccuracy: number;
+  weakTopics: string[];
+  strongTopics: string[];
+  totalLearningTime: number;
+  upcomingRevision: number;
 };
 
 // Server Action Response Types
@@ -142,64 +206,7 @@ export type Session = {
 };
 
 // Form Input Types
-export type CreateGoalInput = Omit<
-  Goal,
-  "id" | "userId" | "createdAt" | "updatedAt"
->;
-export type UpdateGoalInput = Partial<CreateGoalInput>;
-
-export type CreateProjectInput = Omit<
-  Project,
-  "id" | "userId" | "createdAt" | "updatedAt"
->;
-export type UpdateProjectInput = Partial<CreateProjectInput>;
-
-export type CreateTaskInput = Omit<
-  Task,
-  "id" | "userId" | "completedAt" | "createdAt" | "updatedAt"
->;
-export type UpdateTaskInput = Partial<CreateTaskInput>;
-
-export type CreateResourceInput = Omit<
-  Resource,
-  "id" | "userId" | "createdAt" | "updatedAt"
->;
-export type UpdateResourceInput = Partial<CreateResourceInput>;
-
-export type CreateDailyLogInput = Omit<
-  DailyLog,
-  "id" | "userId" | "createdAt" | "updatedAt"
->;
-export type UpdateDailyLogInput = Partial<CreateDailyLogInput>;
-
-// Dashboard Types
-export type DashboardStats = {
-  totalGoals: number;
-  totalProjects: number;
-  totalTasks: number;
-  completedTasks: number;
-  completionRate: number;
-  currentStreak: number;
-  longestStreak: number;
-  recentActivities: Activity[];
-};
-
-export type Activity = {
-  id: string;
-  type: "GOAL_CREATED" | "PROJECT_CREATED" | "TASK_COMPLETED" | "LOG_CREATED";
-  description: string;
-  timestamp: Date;
-  entityId?: string;
-};
-
-// Chart Data Types
-export type ChartDataPoint = {
-  date: string;
-  completed: number;
-  hours: number;
-};
-
-export type ActivityCalendarData = {
-  date: string;
-  count: number;
-};
+export type CreateBookInput = Omit<Book, "id" | "userId" | "createdAt" | "updatedAt">;
+export type UpdateUserBookInput = Partial<Omit<UserBook, "id" | "userId" | "bookId" | "createdAt" | "updatedAt">>;
+export type CreateNoteInput = Omit<UserNote, "id" | "userId" | "createdAt" | "updatedAt">;
+export type CreateQuizAttemptInput = Omit<QuizAttempt, "id" | "createdAt" | "updatedAt">;
