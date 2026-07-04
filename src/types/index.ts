@@ -1,4 +1,15 @@
-// User Types
+import type { Book as _Book } from "./book";
+import type { UserNote as _UserNote } from "./note";
+import type { QuizAttempt as _QuizAttempt } from "./quiz";
+
+export type { Book, BookChapter, BookStatus } from "./book";
+export type { Section, SectionExplanation, VerificationResult, LearningContent } from "./chapter";
+export type { Quiz, QuizAttempt, QuestionType, RevisionSchedule } from "./quiz";
+export type { Flashcard, FlashcardReview, SpacedRepetition, LearningState } from "./flashcard";
+export type { UserNote, NoteType } from "./note";
+export type { SearchQuery, SearchResult, SectionSearchResult } from "./search";
+export type { ProcessingJob, JobStatus, BookProcessingJobData } from "./queue";
+
 export type User = {
   id: string;
   email: string;
@@ -9,37 +20,6 @@ export type User = {
   updatedAt: Date;
 };
 
-// Book Types
-export type BookStatus = "PROCESSING" | "READY" | "ERROR";
-
-export type Book = {
-  id: string;
-  userId: string;
-  title: string;
-  author: string | null;
-  fileType: string;
-  fileUrl: string;
-  status: BookStatus;
-  totalChapters: number;
-  createdAt: Date;
-  updatedAt: Date;
-};
-
-// BookChapter Types
-export type BookChapter = {
-  id: string;
-  bookId: string;
-  index: number;
-  title: string;
-  content: string;
-  embedding: number[] | null;
-  summary: string | null;
-  keyPoints: any;
-  createdAt: Date;
-  updatedAt: Date;
-};
-
-// UserBook Types
 export type LearningMode = "BEGINNER" | "STUDENT" | "INTERVIEW" | "ADVANCED";
 
 export type UserBook = {
@@ -51,11 +31,13 @@ export type UserBook = {
   learningGoal: string | null;
   dailyStudyMinutes: number;
   completed: boolean;
+  quizScores: any;
+  revisionCount: number;
+  weakTopics: any;
   createdAt: Date;
   updatedAt: Date;
 };
 
-// LearningSession Types
 export type SessionType = "LESSON" | "QUIZ" | "REVISION" | "CHAT";
 
 export type LearningSession = {
@@ -69,62 +51,6 @@ export type LearningSession = {
   updatedAt: Date;
 };
 
-// Quiz Types
-export type QuestionType = "MCQ" | "SHORT_ANSWER" | "CODING" | "SCENARIO";
-
-export type Quiz = {
-  id: string;
-  bookId: string;
-  chapterId: string;
-  type: QuestionType;
-  questions: any;
-  createdAt: Date;
-  updatedAt: Date;
-};
-
-// QuizAttempt Types
-export type QuizAttempt = {
-  id: string;
-  userId: string;
-  quizId: string;
-  score: number;
-  totalQuestions: number;
-  answers: any;
-  feedback: any;
-  weakTopics: any;
-  strongTopics: any;
-  createdAt: Date;
-  updatedAt: Date;
-};
-
-// Flashcard Types
-export type Flashcard = {
-  id: string;
-  userId: string;
-  bookId: string;
-  chapterId: string;
-  front: string;
-  back: string;
-  difficulty: number;
-  createdAt: Date;
-  updatedAt: Date;
-};
-
-// FlashcardReview Types
-export type FlashcardReview = {
-  id: string;
-  flashcardId: string;
-  userId: string;
-  easeFactor: number;
-  interval: number;
-  repetitions: number;
-  nextReviewAt: Date;
-  lastReviewedAt: Date;
-  createdAt: Date;
-  updatedAt: Date;
-};
-
-// ConversationMessage Types
 export type MessageRole = "USER" | "AI";
 
 export type ConversationMessage = {
@@ -139,35 +65,6 @@ export type ConversationMessage = {
   updatedAt: Date;
 };
 
-// UserNote Types
-export type NoteType = "NOTE" | "HIGHLIGHT" | "BOOKMARK";
-
-export type UserNote = {
-  id: string;
-  userId: string;
-  bookId: string;
-  chapterId: string;
-  content: string;
-  type: NoteType;
-  pageRef: string | null;
-  createdAt: Date;
-  updatedAt: Date;
-};
-
-// RevisionSchedule Types
-export type RevisionSchedule = {
-  id: string;
-  userId: string;
-  bookId: string;
-  chapterId: string;
-  scheduledAt: Date;
-  completedAt: Date | null;
-  interval: number;
-  createdAt: Date;
-  updatedAt: Date;
-};
-
-// Dashboard Types
 export type LearningStats = {
   totalBooks: number;
   activeBook: string | null;
@@ -184,7 +81,6 @@ export type LearningStats = {
   upcomingRevision: number;
 };
 
-// Server Action Response Types
 export type ServerActionResponse<T = any> = {
   success: boolean;
   data?: T;
@@ -192,7 +88,6 @@ export type ServerActionResponse<T = any> = {
   message?: string;
 };
 
-// Session Types
 export type SessionUser = {
   id: string;
   email: string;
@@ -205,8 +100,7 @@ export type Session = {
   expires: string;
 };
 
-// Form Input Types
-export type CreateBookInput = Omit<Book, "id" | "userId" | "createdAt" | "updatedAt">;
+export type CreateBookInput = Omit<_Book, "id" | "userId" | "createdAt" | "updatedAt">;
 export type UpdateUserBookInput = Partial<Omit<UserBook, "id" | "userId" | "bookId" | "createdAt" | "updatedAt">>;
-export type CreateNoteInput = Omit<UserNote, "id" | "userId" | "createdAt" | "updatedAt">;
-export type CreateQuizAttemptInput = Omit<QuizAttempt, "id" | "createdAt" | "updatedAt">;
+export type CreateNoteInput = Omit<_UserNote, "id" | "userId" | "createdAt" | "updatedAt">;
+export type CreateQuizAttemptInput = Omit<_QuizAttempt, "id" | "createdAt" | "updatedAt">;
