@@ -9,7 +9,7 @@ import Google from "next-auth/providers/google";
 import bcrypt from "bcryptjs";
 import { sequelize } from "@/lib/db/sequelize";
 import { initializeModels, User } from "@/lib/db/init";
-import { LoginSchema } from "@/utils/validators";
+import { LoginSchema } from "@/validations/validators";
 
 const id = process.env.GOOGLE_ID;
 const secret = process.env.GOOGLE_SECRET;

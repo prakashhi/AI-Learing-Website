@@ -1,18 +1,22 @@
 import { NextRequest, NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 import { User } from "@/lib/db/init";
-import { RegisterSchema } from "@/utils/validators";
+import { RegisterSchema } from "@/validations/validators";
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
 
+
     // 1. Validate input using Zod schema
     const validation = RegisterSchema.safeParse(body);
     if (!validation.success) {
       return NextResponse.json(
-        { message: "Invalid input", errors: validation.error.flatten().fieldErrors },
-        { status: 400 }
+        {
+          message: "Invalid input",
+          errors: validation.error.flatten().fieldErrors,
+        },
+        { status: 400 },
       );
     }
 
@@ -22,8 +26,8 @@ export async function POST(req: NextRequest) {
     const existingUser = await User.findOne({ where: { email } });
     if (existingUser) {
       return NextResponse.json(
-        { message: "A user with this email already exists" },
-        { status: 400 }
+        { status: false, message: "A user with this email already exists" },
+        { status: 400 },
       );
     }
 
@@ -39,17 +43,18 @@ export async function POST(req: NextRequest) {
     });
 
     return NextResponse.json(
-      { 
+      {
+        status: true,
         message: "User registered successfully",
-        userId: newUser.id 
+        userId: newUser.id,
       },
-      { status: 201 }
+      { status: 201 },
     );
   } catch (error) {
     console.error("Registration error:", error);
     return NextResponse.json(
       { message: "Internal server error" },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }

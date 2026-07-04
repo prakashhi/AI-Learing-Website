@@ -9,6 +9,7 @@ export class Flashcard extends Model {
   public front!: string;
   public back!: string;
   public difficulty!: number;
+  public learningState!: "NEW" | "LEARNING" | "REVIEW";
   public readonly createdAt!: Date;
   public readonly updatedAt!: Date;
 }
@@ -43,6 +44,11 @@ Flashcard.init(
     difficulty: {
       type: DataTypes.INTEGER,
       defaultValue: 0,
+      allowNull: false,
+    },
+    learningState: {
+      type: DataTypes.ENUM("NEW", "LEARNING", "REVIEW"),
+      defaultValue: "NEW",
       allowNull: false,
     },
   },

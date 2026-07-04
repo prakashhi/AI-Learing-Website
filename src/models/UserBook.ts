@@ -10,6 +10,9 @@ export class UserBook extends Model {
   public learningGoal!: string;
   public dailyStudyMinutes!: number;
   public completed!: boolean;
+  public quizScores!: any;
+  public revisionCount!: number;
+  public weakTopics!: any;
   public readonly createdAt!: Date;
   public readonly updatedAt!: Date;
 }
@@ -52,6 +55,19 @@ UserBook.init(
       type: DataTypes.BOOLEAN,
       defaultValue: false,
       allowNull: false,
+    },
+    quizScores: {
+      type: DataTypes.JSONB,
+      allowNull: true,
+    },
+    revisionCount: {
+      type: DataTypes.INTEGER,
+      defaultValue: 0,
+      allowNull: false,
+    },
+    weakTopics: {
+      type: DataTypes.JSONB,
+      allowNull: true,
     },
   },
   {

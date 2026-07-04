@@ -6,10 +6,11 @@ export class BookChapter extends Model {
   public bookId!: string;
   public index!: number;
   public title!: string;
-  public content!: string;
-  public embedding!: number[];
+  public rawText!: string;
+  public cleanText!: string;
+  public fullExplanation!: string;
   public summary!: string;
-  public keyPoints!: any;
+  public learningMaterial!: any;
   public readonly createdAt!: Date;
   public readonly updatedAt!: Date;
 }
@@ -33,19 +34,23 @@ BookChapter.init(
       type: DataTypes.STRING,
       allowNull: false,
     },
-    content: {
+    rawText: {
       type: DataTypes.TEXT,
-      allowNull: false,
+      allowNull: true,
     },
-    embedding: {
-      type: DataTypes.ARRAY(DataTypes.FLOAT),
+    cleanText: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+    },
+    fullExplanation: {
+      type: DataTypes.TEXT,
       allowNull: true,
     },
     summary: {
       type: DataTypes.TEXT,
       allowNull: true,
     },
-    keyPoints: {
+    learningMaterial: {
       type: DataTypes.JSONB,
       allowNull: true,
     },

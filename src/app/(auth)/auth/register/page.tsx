@@ -23,7 +23,7 @@ import {
 } from "@mui/material";
 import { motion, AnimatePresence } from "framer-motion";
 import toast from "react-hot-toast";
-import { RegisterSchema } from "@/utils/validators";
+import { RegisterSchema } from "@/validations/validators";
 
 // Material-UI Icons
 import PersonOutlinedIcon from "@mui/icons-material/PersonOutlined";
