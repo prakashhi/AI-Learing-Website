@@ -1,8 +1,8 @@
 export { LoginSchema, RegisterSchema } from "./auth";
 export type { LoginInput, RegisterInput } from "./auth";
 
-export { UploadBookSchema, UpdateUserBookSchema } from "./book";
-export type { UploadBookInput, UpdateUserBookInput } from "./book";
+export { UploadBookSchema, UpdateUserBookSchema, FileValidationSchema, ALLOWED_FILE_TYPES, MAX_FILE_SIZE } from "./book";
+export type { UploadBookInput, UpdateUserBookInput, FileValidationInput } from "./book";
 
 export { GenerateQuizSchema, QuizSubmitSchema, ChatMessageSchema } from "./quiz";
 export type { GenerateQuizInput, QuizSubmitInput, ChatMessageInput } from "./quiz";

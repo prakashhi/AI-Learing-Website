@@ -9,8 +9,6 @@ export class UserNote extends Model {
   public content!: string;
   public type!: "NOTE" | "HIGHLIGHT" | "BOOKMARK";
   public pageRef!: string;
-  public readonly createdAt!: Date;
-  public readonly updatedAt!: Date;
 }
 
 UserNote.init(

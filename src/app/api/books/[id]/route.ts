@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { supabaseAdmin, STORAGE_BUCKET } from "@/lib/supabase";
+import { SuperBaseAdmin, STORAGE_BUCKET } from "@/lib/supabase";
 import { Book, BookChapter, UserBook } from "@/lib/db/init";
 
 export async function GET(
@@ -65,7 +65,7 @@ export async function DELETE(
 
     const filePath = `${session.user.id}/${book.id}/${book.title}.${book.fileType}`;
     try {
-      await supabaseAdmin().storage.from(STORAGE_BUCKET).remove([filePath]);
+      await SuperBaseAdmin().storage.from(STORAGE_BUCKET).remove([filePath]);
     } catch {
       console.warn("⚠️ Could not remove file from storage");
     }

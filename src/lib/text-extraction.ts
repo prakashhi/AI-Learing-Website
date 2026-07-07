@@ -1,4 +1,4 @@
-
+import type { Buffer } from "buffer";
 
 export type ExtractedChapter = {
   index: number;
@@ -32,39 +32,48 @@ export async function extractText(
 
 async function extractPDF(buffer: Buffer): Promise<ExtractionResult> {
   try {
-    const { PDFParse } = await import("pdf-parse");
-    const data = new PDFParse({ data: buffer });
-    const text =  await data.getText();
-    return detectChapters(text.text);
+    const { Document } = await import("mupdf");
+    const doc = Document.openDocument(buffer, "pdf");
+    const pageCount = doc.countPages();
+    const pages: string[] = [];
+
+    for (let i = 0; i < pageCount; i++) {
+      const page = doc.loadPage(i);
+      const stext = page.toStructuredText();
+      pages.push(stext.asText());
+    }
+
+    const fullText = pages.join("\n\n");
+    return detectChapters(fullText);
   } catch (e) {
-    console.log(e);
+    console.error("MuPDF.js extraction failed:", e);
     throw new Error(
-      "PDF parsing requires 'pdf-parse' package. Run: npm install pdf-parse",
+      "PDF parsing failed. Ensure 'mupdf' package is installed.",
     );
   }
 }
 
 async function extractEPUB(buffer: Buffer): Promise<ExtractionResult> {
   try {
-    const epubParser =require("epub-parser")
+    const epubParser = await import("epub-parser");
     const data = await epubParser.parse(buffer);
     const text = (data?.spine || []).map((item: any) => item.text).join("\n\n");
     return detectChapters(text);
   } catch {
     throw new Error(
-      "EPUB parsing requires 'epub-parser' package. Run: npm install epub-parser",
+      "EPUB parsing failed. Ensure 'epub-parser' package is installed.",
     );
   }
 }
 
 async function extractDOCX(buffer: Buffer): Promise<ExtractionResult> {
   try {
-     const mammoth = require("mammoth");
-    // const data = await mammoth.extractRawText({ buffer });
-    return detectChapters(data.value);
+    const mammoth = await import("mammoth");
+    const result = await mammoth.extractRawText({ buffer });
+    return detectChapters(result.value);
   } catch {
     throw new Error(
-      "DOCX parsing requires 'mammoth' package. Run: npm install mammoth",
+      "DOCX parsing failed. Ensure 'mammoth' package is installed.",
     );
   }
 }

@@ -10,8 +10,6 @@ export class Book extends Model {
   public fileUrl!: string;
   public status!: "PROCESSING" | "READY" | "ERROR";
   public totalChapters!: number;
-  public readonly createdAt!: Date;
-  public readonly updatedAt!: Date;
 }
 
 Book.init(

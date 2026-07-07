@@ -8,8 +8,6 @@ export class LearningSession extends Model {
   public chapterId!: string;
   public duration!: number;
   public type!: "LESSON" | "QUIZ" | "REVISION" | "CHAT";
-  public readonly createdAt!: Date;
-  public readonly updatedAt!: Date;
 }
 
 LearningSession.init(

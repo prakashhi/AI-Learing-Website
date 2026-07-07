@@ -10,8 +10,6 @@ export class Flashcard extends Model {
   public back!: string;
   public difficulty!: number;
   public learningState!: "NEW" | "LEARNING" | "REVIEW";
-  public readonly createdAt!: Date;
-  public readonly updatedAt!: Date;
 }
 
 Flashcard.init(

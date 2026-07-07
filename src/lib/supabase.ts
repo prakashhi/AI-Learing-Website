@@ -1,4 +1,4 @@
-import "server-only";
+// import "server-only";
 import { createClient } from "@supabase/supabase-js";
 
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -18,7 +18,7 @@ const cleanUrl = supabaseUrl!.replace(/\/rest\/v1\/?$/, "");
 
 export const supabase = createClient(cleanUrl, supabaseAnonKey!);
 
-export function supabaseAdmin() {
+export function SuperBaseAdmin() {
   return createClient(cleanUrl, supabaseServiceKey || supabaseAnonKey!, {
     auth: { autoRefreshToken: false, persistSession: false },
   });

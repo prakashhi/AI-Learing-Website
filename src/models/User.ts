@@ -13,8 +13,6 @@ export class User extends Model {
   public image!: string | null;
   public password!: string | null; // For email/password auth
   public emailVerified!: boolean;
-  public readonly createdAt!: Date;
-  public readonly updatedAt!: Date;
 }
 
 User.init(

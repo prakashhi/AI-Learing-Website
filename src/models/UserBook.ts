@@ -13,8 +13,6 @@ export class UserBook extends Model {
   public quizScores!: any;
   public revisionCount!: number;
   public weakTopics!: any;
-  public readonly createdAt!: Date;
-  public readonly updatedAt!: Date;
 }
 
 UserBook.init(

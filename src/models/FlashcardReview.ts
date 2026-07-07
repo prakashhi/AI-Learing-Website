@@ -10,8 +10,6 @@ export class FlashcardReview extends Model {
   public repetitions!: number;
   public nextReviewAt!: Date;
   public lastReviewedAt!: Date;
-  public readonly createdAt!: Date;
-  public readonly updatedAt!: Date;
 }
 
 FlashcardReview.init(

@@ -365,7 +365,7 @@ export default function LoginPage() {
           <Box className="text-center mb-8">
             <motion.div {...fadeInUp}>
               <Typography
-                variant="h2"
+                variant="h5"
                 sx={{
                   fontWeight: 800,
                   letterSpacing: "-0.02em",

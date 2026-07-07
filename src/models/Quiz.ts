@@ -7,8 +7,6 @@ export class Quiz extends Model {
   public chapterId!: string;
   public type!: "MCQ" | "SHORT_ANSWER" | "CODING" | "SCENARIO";
   public questions!: any;
-  public readonly createdAt!: Date;
-  public readonly updatedAt!: Date;
 }
 
 Quiz.init(

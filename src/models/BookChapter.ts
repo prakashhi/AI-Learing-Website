@@ -11,8 +11,6 @@ export class BookChapter extends Model {
   public fullExplanation!: string;
   public summary!: string;
   public learningMaterial!: any;
-  public readonly createdAt!: Date;
-  public readonly updatedAt!: Date;
 }
 
 BookChapter.init(

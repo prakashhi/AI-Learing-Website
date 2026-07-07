@@ -2,12 +2,26 @@ import { getQueue, startQueue, stopQueue } from "@/queue/pgboss";
 import type { JobWithMetadata } from "pg-boss";
 
 export class QueueService {
+  private static instance: QueueService;
+  private started = false;
+
+  static getInstance(): QueueService {
+    if (!QueueService.instance) {
+      QueueService.instance = new QueueService();
+    }
+    return QueueService.instance;
+  }
+
   async connect(): Promise<void> {
-    await startQueue();
+    if (!this.started) {
+      await startQueue();
+      this.started = true;
+    }
   }
 
   async disconnect(): Promise<void> {
     await stopQueue();
+    this.started = false;
   }
 
   async add<T = Record<string, unknown>>(
@@ -15,7 +29,12 @@ export class QueueService {
     data: T,
     options?: { retryLimit?: number; retryDelay?: number },
   ): Promise<string> {
+    if (!this.started) {
+      await startQueue();
+      this.started = true;
+    }
     const boss = getQueue();
+    await boss.createQueue(queue);
     const id = await boss.send(queue, data as object, (options ?? null) as any);
     if (!id) throw new Error(`Failed to enqueue job on "${queue}"`);
     return id;

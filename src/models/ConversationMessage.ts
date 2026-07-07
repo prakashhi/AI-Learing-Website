@@ -9,8 +9,6 @@ export class ConversationMessage extends Model {
   public role!: "USER" | "AI";
   public content!: string;
   public metadata!: any;
-  public readonly createdAt!: Date;
-  public readonly updatedAt!: Date;
 }
 
 ConversationMessage.init(

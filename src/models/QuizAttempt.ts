@@ -11,8 +11,6 @@ export class QuizAttempt extends Model {
   public feedback!: any;
   public weakTopics!: any;
   public strongTopics!: any;
-  public readonly createdAt!: Date;
-  public readonly updatedAt!: Date;
 }
 
 QuizAttempt.init(

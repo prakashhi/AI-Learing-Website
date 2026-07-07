@@ -11,8 +11,6 @@ export class Section extends Model {
   public examples!: any;
   public definitions!: any;
   public embedding!: number[];
-  public readonly createdAt!: Date;
-  public readonly updatedAt!: Date;
 }
 
 Section.init(

@@ -11,8 +11,6 @@ export class ProcessingJob extends Model {
   public pgBossJobId!: string;
   public startedAt!: Date;
   public completedAt!: Date;
-  public readonly createdAt!: Date;
-  public readonly updatedAt!: Date;
 }
 
 ProcessingJob.init(

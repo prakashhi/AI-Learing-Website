@@ -331,71 +331,137 @@ ProcessingJob ──belongsTo──> Book
 
 **Goal:** Upload files → Store PDF → Create record → Background job (PG-Boss) → Stage 1 (Extract & Clean) → Stage 2 (Logical splitting & Section AI gen & Verification) → Stage 3 (Generate learning content).
 
+Key changes from original plan:
+- Extract + Clean + Detect Chapters moved from API route to background worker → **API returns immediately** (<1s)
+- Worker is **idempotent** — on crash/restart, skips already-completed chapters by checking `BookChapter.fullExplanation`
+- **Percentage progress** tracked per stage: extract(10%) → clean(5%) → detect chapters(5%) → AI pipeline(60%) → finalize(20%)
+
 ### Files to CREATE
 
 | File | Purpose |
 |------|---------|
-| `src/features/books/services/BookUploadService.ts` | Orchestrates: validate → storage → extract → clean → chapters → enqueue job |
-| `src/features/ai/services/SectionSplitter.ts` | AI call: split chapter content into logical sections (Introduction, Concepts, Summary) |
-| `src/features/ai/services/ExplanationGenerator.ts` | AI call: generate explanation + definitions + examples + formulas + memory tips per section |
-| `src/features/ai/services/VerificationService.ts` | AI call: compare original chapter vs generated, check 8 missing items, regenerate |
-| `src/features/ai/services/ContentGenerator.ts` | AI call: generate the comprehensive 17-point learning materials list |
-| `src/workers/bookProcessingWorker.ts` | PG-Boss work handler: `boss.work('book-processing', handler)` — processes each chapter through the pipeline |
+| `src/features/books/services/BookUploadService.ts` | Validates file → uploads to Supabase Storage → creates Book (status: PROCESSING) → creates ProcessingJob → publishes PG-Boss job → returns immediately |
+| `src/features/ai/services/SectionSplitter.ts` | AI call: split cleaned chapter content into logical semantic sections (Introduction, Concepts, Summary) — NOT 500-word chunks |
+| `src/features/ai/services/ExplanationGenerator.ts` | AI call per section: generate { explanation, concepts[], definitions{}, examples[], formulas[], keywords[], commonMistakes[], memoryTips[] } |
+| `src/features/ai/services/VerificationService.ts` | AI call: compare original chapter vs generated explanation. Checks 8 categories. If missing → AI regenerates only missing parts → appends to form Final Verified Chapter Explanation |
+| `src/features/ai/services/ContentGenerator.ts` | AI call: from final verified explanation, generate 17-point learning material (beginner explanation, MCQs, coding tasks, interview questions, etc.) |
+| `src/workers/bookProcessingWorker.ts` | PG-Boss `'book-processing'` handler. Handles full pipeline: extract → clean → detect chapters → AI per chapter → finalize. Idempotent (skips done chapters). Updates progress after each stage. |
 
 ### Files to MODIFY
 
 | File | Changes |
 |------|---------|
-| `src/lib/text-extraction.ts` | Update to use **MuPDF.js** to extract page text, preserving reading order, paragraphs, headings, and tables. |
-| `src/lib/embeddings.ts` | Update to create embeddings for **individual Sections** (not full chapters). |
+| `src/lib/text-extraction.ts` | Update to use **MuPDF.js** (`@mupdf/mupdf`) to extract page text from PDF, preserving reading order, paragraphs, headings, and tables. Also handle epub (epub-parser), docx (mammoth), and md. |
+| `src/lib/embeddings.ts` | Update to generate embeddings for **individual Sections** (`sectionText + explanation`), not full chapters. Stores vector in `book_sections.embedding`. |
+| `src/validations/book.ts` | Add file validation schema: allowed types (pdf/epub/docx/md), max file size. |
 
-### Upload Flow
+### API Route to CREATE
+
+| Route | Method | Description |
+|-------|--------|-------------|
+| `src/app/api/books/upload/route.ts` | POST | Receives file + metadata → calls `BookUploadService` → returns `{ bookId, status: "PROCESSING" }` in <1s |
+
+### Progress Mapping
+
+| Stage | % Range | Updated By |
+|-------|---------|------------|
+| Extracting text | 0–10 | Worker |
+| Cleaning text | 10–15 | Worker |
+| Detecting chapters | 15–20 | Worker |
+| Processing each chapter (AI pipeline) | 20–80 | Worker (60/N per chapter) |
+| Generating embeddings | 80–90 | Worker (per section, included in chapter processing) |
+| Finalizing (Book.status=READY, UserBook) | 90–100 | Worker |
+
+### Crash / Recovery Handling
+
+| Scenario | Handling |
+|----------|----------|
+| Worker crashes mid-chapter | PG-Boss re-enqueues job after keepAlive timeout. Worker re-fetches bookId from ProcessingJob. |
+| Restart re-processes from chapter 1 | **No** — worker checks `BookChapter.findOne({ where: { bookId, index } })` and skips if `fullExplanation` exists. Only unprocessed chapters run through AI. |
+| Repeated failures | After `retryLimit: 2`, PG-Boss stops. `ProcessingJob.status = FAILED`, `Book.status = ERROR`. |
+
+### Upload Flow (Immediate Response)
 
 ```
 POST /api/books/upload
-  1. Receive file → validate type (pdf/epub/docx/md)
+  1. Receive file + metadata → validate type (pdf/epub/docx/md) + size
   2. Upload to Supabase Storage bucket `book-uploads/{userId}/{bookId}/{filename}`
-  3. Create Book record (status: PROCESSING)
-  4. Extract text via @mupdf/mupdf (or mammoth / epub-parser for others)
-     - Maintain reading order, headings, paragraphs, tables
-  5. Clean text (remove headers/footers/page numbers, normalize spacing, resolve broken words)
-  6. Detect chapters (TOC detection, heading detection)
-  7. Create ProcessingJob record (status: QUEUED) with pgBossJobId initially null
-  8. Publish PG-Boss job: `boss.send('book-processing', { bookId, chapters[] }, { retryLimit: 2, retryDelay: 60 })` → update ProcessingJob.pgBossJobId
-  9. Return { bookId, status: "PROCESSING" }
+  3. Create Book record (status: PROCESSING, totalChapters: 0)
+  4. Create ProcessingJob record (status: QUEUED, progress: 0)
+  5. Publish PG-Boss job: boss.send('book-processing', { bookId }, { retryLimit: 2, retryDelay: 60 })
+     → Update ProcessingJob.pgBossJobId
+  6. Return { bookId, status: "PROCESSING" }   ← IMMEDIATE (<1s)
 ```
 
-### Background Worker Flow
+### Background Worker Flow (With Extraction + Idempotent + Progress)
 
 ```
 boss.work('book-processing', async (job) => {
-  const { bookId, chapters } = job.data;
-  Update ProcessingJob: status=PROCESSING (find by pgBossJobId=job.id)
+  const { bookId } = job.data;
+  const processingJob = await ProcessingJob.findOne({ where: { pgBossJobId: job.id } });
+  processingJob.update({ status: PROCESSING, startedAt: new Date() });
 
-  For each chapter:
-    1. SectionSplitter.split(content) → split into logical sections (NOT 500 words chunking; keep complete topics together)
-    2. For each logical section:
-       - ExplanationGenerator.generate(sectionText)
-         → { explanation, concepts, definitions, examples, formulas, keywords, commonMistakes, memoryTips }
-    3. Combine all section explanations → rawExplanation
-    4. VerificationService.verify(originalChapter, rawExplanation)
-       - Compare original against rawExplanation. Check for missing:
-         [concepts, definitions, examples, theorems, formulas, diagram descriptions, warnings, conclusions]
-       - If missing → AI regenerates ONLY missing parts → Appends them to form Final Verified Chapter Explanation
-    5. ContentGenerator.generate(finalChapterExplanation)
-       - Generates the 17-point learning contents:
-         [beginner explanation, detailed explanation, key concepts, definitions, examples, real-world apps, chapter summary, flashcards, revision notes, memory tricks, MCQs, short-answer questions, long-answer questions, coding tasks, practical assignments, interview questions, difficulty level]
-    6. For each section:
-       - Generate embedding vector for { sectionText + explanation }
-       - Save to `book_sections` table
-    7. Save BookChapter with rawText, cleanText, finalExplanation, summary, and learningMaterial (containing flashcards, MCQs, and 17-point content)
-    Update ProcessingJob.progress
+  // ── Stage 1: Extract (10%) ──
+  processingJob.update({ progress: 5 });
+  const fileBuffer = await supabase.storage.download(book.fileUrl);
+  const rawText = extractText(fileBuffer, book.fileType);   // MuPDF.js / mammoth / epub-parser
+  processingJob.update({ progress: 10 });
 
-  After all chapters:
-    Update Book: status=READY, totalChapters=N
-    Create UserBook (currentChapterIndex=0, status=READY)
-    Update ProcessingJob: status=COMPLETED
-    await job.done();
+  // ── Stage 2: Clean (5%) ──
+  const cleanText = cleanText(rawText);   // strip headers/footers/page numbers, normalize spacing
+  processingJob.update({ progress: 15 });
+
+  // ── Stage 3: Detect Chapters (5%) ──
+  const chapters = detectChapters(cleanText);   // TOC detection / heading detection
+  processingJob.update({ progress: 20 });
+  Book.update({ totalChapters: chapters.length });
+
+  // ── Stage 4: Process Each Chapter (60% total, 60/N each) ──
+  for (let i = 0; i < chapters.length; i++) {
+    // IDEMPOTENT: skip if already processed (crash recovery)
+    const existing = await BookChapter.findOne({ where: { bookId, index: i } });
+    if (existing?.fullExplanation) {
+      const pct = 20 + ((i + 1) / chapters.length) * 60;
+      processingJob.update({ progress: Math.round(pct) });
+      continue;
+    }
+
+    const chapter = chapters[i];
+    // 4a. SectionSplitter.split() → logical sections
+    const sections = await SectionSplitter.split(chapter.content);
+    // 4b. For each section: ExplanationGenerator.generate() → save section + embedding
+    for (const section of sections) {
+      const explanation = await ExplanationGenerator.generate(section.text);
+      const embedding = await generateEmbedding(section.text + explanation.explanation);
+      await Section.create({
+        chapterId: savedChapter.id, index: section.index,
+        sectionText: section.text, explanation: explanation.explanation,
+        concepts: explanation.concepts, examples: explanation.examples,
+        definitions: explanation.definitions, embedding
+      });
+    }
+    // 4c. Combine all section explanations
+    const rawExplanation = sections.map(s => s.explanation).join('\n');
+    // 4d. VerificationService.verify() → check 8 missing categories
+    const verified = await VerificationService.verify(chapter.content, rawExplanation);
+    // 4e. ContentGenerator.generate() → 17-point learning material
+    const content = await ContentGenerator.generate(verified.finalExplanation);
+    // 4f. Save BookChapter
+    await BookChapter.create({
+      bookId, index: i, title: chapter.title,
+      rawText: chapter.content, cleanText: chapter.content,
+      fullExplanation: verified.finalExplanation, summary: content.chapterSummary,
+      learningMaterial: content
+    });
+    const pct = 20 + ((i + 1) / chapters.length) * 60;
+    processingJob.update({ progress: Math.round(pct) });
+  }
+
+  // ── Stage 5: Finalize (20%) ──
+  await Book.update({ status: READY, totalChapters: chapters.length });
+  await UserBook.create({ userId: book.userId, bookId, currentChapterIndex: 0 });
+  processingJob.update({ status: COMPLETED, progress: 100, completedAt: new Date() });
+  await job.done();
 });
 ```
 
@@ -403,13 +469,15 @@ boss.work('book-processing', async (job) => {
 
 | # | Test | How |
 |---|------|-----|
-| 1 | Upload PDF via curl | `curl -X POST -F "file=@test.pdf" http://localhost:3000/api/books/upload` → returns book ID |
+| 1 | Upload PDF via curl returns immediately | `curl -X POST -F "file=@test.pdf" http://localhost:3000/api/books/upload` → `{ bookId, status: "PROCESSING" }` in <1s |
 | 2 | MuPDF.js preserves tables | Check console logs during extraction or inspect db |
-| 3 | Job enqueued and processed | Worker starts, splits into sections, runs verification, saves |
+| 3 | Job enqueued and processed | Worker starts, extracts, cleans, splits into sections, runs verification, saves |
 | 4 | Book transitions PROCESSING→READY | Poll `GET /api/books/{id}` until READY |
 | 5 | Sections have embeddings | `SELECT embedding FROM book_sections LIMIT 1` returns vectors |
 | 6 | Verification appends missing | Verify verification loops work by inserting an artificial gap |
-| 7 | `npx tsc --noEmit` passes | No errors |
+| 7 | Progress percentage increases | Poll `ProcessingJob.progress` → goes from 0 to 100 |
+| 8 | Worker crash + restart resumes | Kill worker mid-chapter, restart → skips completed chapters, processes remaining |
+| 9 | `npx tsc --noEmit` passes | No errors |
 
 ---
 
@@ -565,7 +633,7 @@ User: "What is Polymorphism?"
 | P1: Foundation | 12 | 1 | 0 | AI provider responds, PG-Boss connects |
 | P2: Database | 13 | 2 | 1 | Migration succeeds, all tables exist |
 | P3: Types | 12 | 0 | 3 | TypeScript passes, revision and sections validated |
-| P4: Upload | 6 | 2 | 0 | Upload → background job → READY |
+| P4: Upload | 7 | 3 | 0 | Upload → immediate response, background job → READY with progress % |
 | P5: AI Engine | 8 | 0 | 0 | Chat responds using section vector matches |
 | P6: Assessment | 12 | 0 | 0 | Quiz grades, revision analyzes, SM-2 works |
 | P7: UI Pages | 15 | 3 | 0 | All pages render, responsive, interactive flows |
