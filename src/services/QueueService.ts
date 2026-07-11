@@ -27,7 +27,7 @@ export class QueueService {
   async add<T = Record<string, unknown>>(
     queue: string,
     data: T,
-    options?: { retryLimit?: number; retryDelay?: number },
+    options?: { retryLimit?: number; retryDelay?: number ,expireInSeconds?:number},
   ): Promise<string> {
     if (!this.started) {
       await startQueue();

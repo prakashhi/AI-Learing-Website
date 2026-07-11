@@ -10,7 +10,6 @@ export class Section extends Model {
   public concepts!: any;
   public examples!: any;
   public definitions!: any;
-  public embedding!: number[];
 }
 
 Section.init(
@@ -46,10 +45,6 @@ Section.init(
     },
     definitions: {
       type: DataTypes.JSONB,
-      allowNull: true,
-    },
-    embedding: {
-      type: DataTypes.ARRAY(DataTypes.FLOAT),
       allowNull: true,
     },
   },

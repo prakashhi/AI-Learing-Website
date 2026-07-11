@@ -1,641 +1,362 @@
-# AI Learning Platform — Implementation Plan
+# Book Processing & AI Learning Architecture — Implementation Plan
 
-## Tech Stack
-- **Framework:** Next.js 16.2.6 (App Router)
-- **ORM:** Sequelize + sequelize-cli
-- **Database:** Supabase PostgreSQL + pgvector
-- **File Storage:** Supabase Storage
-- **Auth:** NextAuth.js (existing, keep)
-- **Queue:** PG-Boss (PostgreSQL-native background job processing)
-- **AI Model:** Gemini 2.5 Flash (Primary) (Optional Upgrade: Gemini 2.5 Pro)
-- **PDF Processing:** MuPDF.js (via Node.js library `@mupdf/mupdf` or a microservice)
-- **Language:** TypeScript
+> Status: PLAN (not yet implemented). Read top-to-bottom, then give the go-ahead per phase or all at once.
 
 ---
 
-## Architecture Overview
+## 1. Context & Goals
+
+A user uploads a book (PDF/EPUB/DOCX/MD). We want:
+
+1. **Book is "ready" in ~5 seconds** — no waiting for AI.
+2. **AI work happens lazily** — only when a user opens a specific chapter.
+3. **Zero/minimal cost** — use free-tier models, cache aggressively.
+4. **High-quality explanations** — structured learning material (concepts, definitions, examples, flashcards, MCQs, summary).
+5. **Resilient** — if one AI provider is rate-limited or down, fall back to another.
+6. **Optimized** — per-provider rate limiting, validation before storage, single worker process.
+
+### Non-goals (explicitly decided)
+- **No embeddings** — dropped to reduce AI calls and simplify the `Section` model.
+- **No eager processing** — AI does NOT run at upload time.
+- **No Redis / extra services** — cache lives in PostgreSQL.
+- **No horizontal worker scaling** (single worker) — so an in-memory rate limiter is sufficient.
+
+---
+
+## 2. Confirmed Tech Stack
+
+| Layer | Choice | Notes |
+|-------|--------|-------|
+| PDF extraction | **MuPDF.js** (`mupdf`) | Uses `stext.walk()` for font-size-based chapter detection |
+| Queue | **PG-Boss + PostgreSQL** | Already wired; supports retry, supervision, dead-letter |
+| Database | **PostgreSQL + Sequelize ORM** | Existing models |
+| Cache | **PostgreSQL** | `ai_cache` table keyed by content hash (optional cross-book dedupe) |
+| AI Router | **Central module** | retries + rate limiting + caching + provider selection |
+| Primary model | **Groq Llama 3.x** (`llama-3.3-70b-versatile`) | ~14,400 req/day free, fastest inference |
+| Coding fallback | **DeepSeek V3.x** (`deepseek-chat`) | Best coding explanations, 5M free tokens |
+| Large-context fallback | **Gemini Flash / Flash-Lite** | 1M context when chapter exceeds 128K tokens |
+| Validation | **Zod** (already installed v4) | JSON-schema validation before storing AI output |
+| Worker | **Single process** | In-memory per-provider rate limiter |
+
+---
+
+## 3. Architecture Flow
 
 ```
-src/
-├── app/api/           # Thin route handlers (HTTP only → delegate to services)
-├── features/*/services/  # Domain business logic (orchestrates repos + AI + queue)
-├── repositories/      # Data access layer (wraps Sequelize models)
-├── models/            # Sequelize model definitions
-├── queue/             # PG-Boss queue setup
-├── workers/           # PG-Boss workers (background AI pipeline)
-├── lib/               # Shared infrastructure (db, supabase, ai providers, helpers)
-├── validations/       # Zod schemas (shared across routes + services)
-├── types/             # TypeScript type definitions
-└── middleware.ts      # Next.js middleware (auth redirect)
-```
+┌─ UPLOAD TIME (Phase 2: BOOK_EXTRACT) ───────────────────────────────┐
+│                                                                      │
+│  User uploads → BookUploadService queues BOOK_EXTRACT                │
+│    → Worker:                                                        │
+│        1. Download file from Supabase storage                       │
+│        2. extractText() → detect chapters by font size              │
+│        3. cleanText() per chapter                                   │
+│        4. BookChapter.bulkCreate({ rawText, cleanText,              │
+│             status: "pending" })  ← one row per chapter             │
+│        5. Book.update({ status: "READY", totalChapters })           │
+│        6. UserBook.create({ userId, bookId, currentChapterIndex })  │
+│        7. ProcessingJob → COMPLETED                                 │
+│    → Book is READY in ~5s. 0 AI calls.                              │
+└──────────────────────────────────────────────────────────────────────┘
 
-### Data Flow
+┌─ ON DEMAND (user opens Chapter N) ──────────────────────────────────┐
+│                                                                      │
+│  GET /api/books/:bookId/chapters/:index                             │
+│    ├─ status "completed"  → return chapter content + learningmaterial│
+│    ├─ status "pending"    → queue BOOK_PROCESS_CHAPTER,              │
+│    │                        set status "processing", return "generating"│
+│    ├─ status "processing" → return "generating"                     │
+│    └─ status "failed"     → return error (user can retry)            │
+│                                                                      │
+│  Frontend polls every ~2s until "completed".                        │
+│                                                                      │
+│  BOOK_PROCESS_CHAPTER worker:                                       │
+│    1. Load BookChapter, set status "processing"                     │
+│    2. splitChapter(content)            ── via AI Router             │
+│    3. for each section:                                             │
+│         generateExplanation(section.text) ── via AI Router          │
+│         Section.create({ chapterId, index, sectionText,              │
+│             explanation, concepts, examples, definitions })         │
+│    4. verifyContent(chapter, combined)  ── via AI Router            │
+│    5. generateLearningContent(verified) ── via AI Router            │
+│    6. BookChapter.update({ fullExplanation, summary,                │
+│         learningMaterial, status: "completed" })                    │
+└──────────────────────────────────────────────────────────────────────┘
 
-```
-API Route (thin)
-  → Validates with Zod (validations/)
-  → Calls Feature Service (features/*/services/)
-    → Service calls Repository (repositories/) for DB
-    → Service calls AIService (features/ai/services/) for AI
-    → Service calls Queue (queue/) for background jobs
-  → Returns JSON response
+┌─ AI ROUTER (Phase 3, called by every AI service) ───────────────────┐
+│                                                                      │
+│  aiRouter.generate(prompt, schema, opts):                           │
+│    1. Compute key = hash(modelId + modelVersion + promptHash)       │
+│    2. PostgreSQL cache hit? → return cached (0 AI calls)            │
+│    3. Select provider:                                             │
+│         - Groq (primary, p-limit 25)                                │
+│         - on 429 / error → DeepSeek (fallback, p-limit 20)          │
+│         - if prompt tokens > 128K → Gemini Flash (1M ctx)          │
+│    4. Call provider with retry + exponential backoff (router-level) │
+│    5. Validate response with Zod schema                            │
+│    6. Store in ai_cache (unless validation failed → retry/next prov)│
+│    7. Return parsed result                                          │
+│                                                                      │
+│  Circuit breaker: per-provider failure counter → cool-down          │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Memory Architecture (Layered & Section-Level)
+## 4. Phase-wise Plan
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│  LAYER 1: DATABASE (Permanent, structured)                       │
-│  • user_books: current chapter, progress %, learning mode        │
-│  • learning_sessions: time spent per session                     │
-│  • quiz_attempts: scores, weak/strong topics per quiz            │
-│  • conversation_messages: EVERY chat message ever stored         │
-│  • flashcard_reviews: spaced repetition intervals                │
-│  • processing_jobs: background job tracking                      │
-│                                                                    │
-│  LAYER 2: EMBEDDINGS (Semantic search via pgvector on Sections)   │
-│  • Each logical section explanation stored as vector(1536)       │
-│  • User question → semantic search on COMPLETED sections only     │
-│  • Sends ONLY relevant section texts to minimize context & cost   │
-│                                                                    │
-│  LAYER 3: PROMPT CONTEXT (Assembled per request)                  │
-│  Every AI request assembles:                                      │
-│    1. Relevant retrieved sections (Semantic Search match)        │
-│    2. Current chapter summaries (concise)                         │
-│    3. Last 5-10 conversation messages                             │
-│    4. Quiz performance summary (weak/strong topics)               │
-│    5. Learning mode preference (Beginner, Student, Interview)     │
-│  → All injected into the AI provider prompt                       │
-└──────────────────────────────────────────────────────────────────┘
-```
+### Phase 0 — Foundation (ALREADY DONE)
+**Files:** `src/lib/text-extraction.ts`, queue/DB/models in place.
+
+- PDF extraction rewritten to use `stext.walk()`:
+  - Single-pass extraction (font sizes + lines in one walk) — ~2× faster
+  - Font-size clustering (relative gap `max(1.5, size×0.15)`) → H1/H2/H3 detection
+  - Bold as secondary heading signal
+  - Paragraph detection via text-block boundaries
+  - Hyphenation fix (`inform-\nation` → `information`)
+- PG-Boss + PostgreSQL + Sequelize models exist.
+- Gemini provider exists (used as large-context fallback only going forward).
 
 ---
 
-## AI Provider Architecture (Pluggable)
+### Phase 1 — BookChapter status field
+**Files:** `src/models/BookChapter.ts`
 
-```
-src/features/ai/
-├── services/                 # High-level AI orchestration
-│   ├── AIService.ts          # Unified facade
-│   ├── SectionSplitter.ts    # Split chapter → logical semantic sections
-│   ├── ExplanationGenerator.ts # Per-section explanation
-│   ├── VerificationService.ts  # Compare original vs generated, fill gaps
-│   ├── ContentGenerator.ts    # Summary, flashcards, 17-point material
-│   ├── QuizGradingService.ts  # Grade answers, extract weak topics
-│   └── ChatService.ts        # Context assembly, RAG, streaming
-├── providers/
-│   ├── BaseProvider.ts       # Abstract class: chat(), chatStream(), generateEmbedding()
-│   ├── GeminiProvider.ts     # Google Gemini (default)
-│   ├── OpenAIProvider.ts     # GPT-4o / o3 (future)
-│   └── ClaudeProvider.ts     # Anthropic Claude (future)
-├── registry.ts
-└── types.ts
+Add a `status` column so the on-demand flow can track per-chapter state:
+
+```typescript
+// in class:
+public status!: "pending" | "processing" | "completed" | "failed";
+
+// in init():
+status: {
+  type: DataTypes.ENUM("pending", "processing", "completed", "failed"),
+  defaultValue: "pending",
+  allowNull: false,
+},
 ```
 
-Provider selected via `AI_PROVIDER` env var.
+No migration needed if `sync({ alter: true })` is used; otherwise add a Sequelize migration.
 
 ---
 
-## Phase 0: Project Restructure (src/ Directory + Config)
+### Phase 2 — Two-queue worker architecture
+**Files:** `src/queue/queues.ts`, `src/workers/bookProcessingWorker.ts`, `src/workers/start.ts`, `src/features/books/services/BookUploadService.ts`
 
-**Goal:** Move root-level code into `src/`, update tsconfig, establish base patterns.
+**Why:** The old single `BOOK_PROCESSING` job did everything (extract + AI) in one shot. If it crashed mid-way, the whole book retried. Splitting into two queues isolates the fast, deterministic extraction from the slow, AI-heavy chapter processing.
 
-### Files to MOVE
+**`queues.ts`:**
+```typescript
+export const QUEUES = {
+  BOOK_EXTRACT: "book-extract",
+  BOOK_PROCESS_CHAPTER: "book-process-chapter",
+} as const;
 
-| Current Path | New Path |
-|---|---|
-| `app/` | `src/app/` |
-| `components/` | `src/components/` |
-| `lib/` | `src/lib/` |
-| `models/` | `src/models/` |
-| `types/` | `src/types/` |
-| `migrations/` | `src/migrations/` |
-| `utils/validators.ts` | `src/validations/` (split into domain files) |
-| `utils/helpers.ts` | `src/lib/helpers.ts` |
-| `config/` | `src/config/` |
-| `middleware.ts` | `src/middleware.ts` |
-
-### Files to CREATE
-
-| File | Purpose |
-|------|---------|
-| `src/repositories/BaseRepository.ts` | Generic: findById, findAll, create, update, destroy |
-| `src/queue/pgboss.ts` | PG-Boss singleton init + graceful shutdown |
-| `src/queue/queues.ts` | Job name constants + publish helpers (PG-Boss) |
-
-### Files to DELETE
-
-| File | Reason |
-|------|--------|
-| `src/queue/connections.ts` | Replaced by PG-Boss (no Redis needed) |
-
-### Files to MODIFY
-
-| File | Changes |
-|------|---------|
-| `tsconfig.json` | `"@/*": ["./src/*"]` |
-| `.sequelizerc` | All paths → `src/models`, `src/migrations`, `src/config` |
-
-### Dependencies to install
-```bash
-npm install pg-boss
+export type BookExtractData = { bookId: string };
+export type BookProcessChapterData = { bookId: string; chapterIndex: number };
 ```
 
-### Test & Verify (Strong Rule)
+**`bookProcessingWorker.ts` — two handlers:**
 
-| # | Test | How |
-|---|------|-----|
-| 1 | `npm run dev` starts on port 3000 | Visit `http://localhost:3000` |
-| 2 | `npx tsc --noEmit` passes | All imports resolve under `src/` |
-| 3 | `npm run db:migrate` succeeds | Updated sequelizerc paths work |
+`handleBookExtract(job)`:
+- Update ProcessingJob → PROCESSING
+- Download file
+- `extractText()` → `cleanText()` per chapter
+- `BookChapter.bulkCreate(... status: "pending")`
+- `Book.update({ status: "READY", totalChapters })`
+- `UserBook.create(...)`
+- ProcessingJob → COMPLETED, `job.done()`
+
+`handleChapterProcess(job)`:
+- Load BookChapter by `{ bookId, index: chapterIndex }`
+- Set status → "processing"
+- Run the AI pipeline (Phase 7) via AI Router
+- On success: status → "completed"
+- On failure: status → "failed" (router retries separately via pg-boss)
+
+Register both:
+```typescript
+boss.createQueue(QUEUES.BOOK_EXTRACT);
+boss.createQueue(QUEUES.BOOK_PROCESS_CHAPTER);
+boss.work(QUEUES.BOOK_EXTRACT, { batchSize: 5 }, extractHandler);
+boss.work(QUEUES.BOOK_PROCESS_CHAPTER, { batchSize: 5 }, chapterHandler);
+```
+
+**`BookUploadService.ts`:** queue `BOOK_EXTRACT` (was `BOOK_PROCESSING`); `expireInSeconds: 120`.
+
+**`start.ts` `requeueStaleJobs()`:** re-queue both `BOOK_EXTRACT` (via ProcessingJob) and `BOOK_PROCESS_CHAPTER` (via BookChapter where status = "processing").
 
 ---
 
-## Phase 1: Foundation & Infrastructure
+### Phase 3 — AI Router (core)
+**New file:** `src/lib/ai/router.ts`
+**New file:** `src/models/AICache.ts` (PostgreSQL cache table)
 
-**Goal:** Install deps, set up Supabase client, PG-Boss queue, text cleaning, service base, AI provider layer.
+**Why:** Centralizes retries, rate limiting, caching, and provider selection so no AI service reimplements them. This is the single most important production component.
 
-### Dependencies to install
-```bash
-npm install @supabase/supabase-js @google/generative-ai mammoth @mupdf/mupdf epub-parser react-markdown rehype-highlight
-```
+Responsibilities:
+1. **Cache lookup** — `key = sha256(modelId + modelVersion + promptHash)`. Hit → return immediately.
+2. **Provider selection** —
+   - Default: Groq
+   - On `429` / network error → DeepSeek
+   - If estimated prompt tokens > 128K → Gemini Flash
+3. **Rate limiting** — in-memory `p-limit` per provider (Groq 25, DeepSeek 20, Gemini 4). Single worker → safe.
+4. **Retry + backoff** — router-level: 3 attempts, exponential backoff (1s/2s/4s). Replaces the worker's old `withRetry`.
+5. **Circuit breaker** — per-provider failure count; if > N consecutive failures, cool down that provider for T seconds.
+6. **Cache store** — on success, write to `ai_cache` table.
 
-### Files to CREATE
+```typescript
+// Sketch
+export async function routeAI(
+  prompt: string,
+  schema: ZodSchema,
+  opts?: { modelVersion?: string; task?: "explain" | "split" | "verify" | "learn" },
+): Promise<unknown> {
+  const key = hash(ACTIVE_MODEL + (opts?.modelVersion ?? "v1") + sha256(prompt));
+  const cached = await AICache.findByPk(key);
+  if (cached) return cached.response;
 
-| File | Purpose |
-|------|---------|
-| `src/lib/supabase.ts` | Supabase client singleton (storage + anon key) |
-| `src/lib/text-cleaning.ts` | `cleanText(rawText)` — strip headers/footers/page numbers, fix broken words, normalize spacing |
-| `src/lib/helpers.ts` | Utility functions (from existing utils/helpers.ts) |
-| `src/lib/ai/types.ts` | Unified AIProvider types |
-| `src/lib/ai/providers/BaseProvider.ts` | Abstract class |
-| `src/lib/ai/providers/GeminiProvider.ts` | Implements BaseProvider |
-| `src/lib/ai/registry.ts` | `getProvider(model?)` |
-| `src/lib/ai/index.ts` | Re-exports |
-| `src/repositories/BaseRepository.ts` | Generic CRUD base class |
-| `src/services/BaseService.ts` | Abstract service: getCurrentUser(), validate(), error handling |
-| `src/services/AIService.ts` | Facade: splitIntoSections(), generateExplanation(), verifyContent(), generateLearningContent() |
-| `src/services/QueueService.ts` | publishBookProcessingJob(), getJobStatus() (wraps PG-Boss) |
-
-### Files to MODIFY
-
-| File | Changes |
-|------|---------|
-| `.env` | Add `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_STORAGE_BUCKET`, `AI_PROVIDER=gemini`. Add `DATABASE_URL` (same as Sequelize connection) for PG-Boss if not already present |
-
-### Test & Verify (Strong Rule)
-
-| # | Test | How |
-|---|------|-----|
-| 1 | `npm install` succeeds | Run command, no errors |
-| 2 | `npm run dev` starts | Visit `http://localhost:3000` |
-| 3 | Supabase client connects | Init client, list storage buckets |
-| 4 | AI provider instantiates | `getProvider().chat(...)` → returns response |
-| 5 | PG-Boss starts | `boss.start()` resolves, `boss.isConnected` is true |
-| 6 | PG-Boss queue works | `boss.send('book-processing', data)` → worker receives it |
-| 7 | cleanText works | Input with page numbers → cleaned output |
-
-**If any test fails → Phase 1 is BLOCKED.**
-
----
-
-## Phase 2: Database Schema — Models & Migrations
-
-**Goal:** Create 13 models, support section-level embeddings, quiz structures, and revision counts.
-
-### Files to CREATE (13 models)
-
-| File | Key Fields |
-|------|------------|
-| `src/models/User.ts` | id, email(unique), name, image, password, emailVerified |
-| `src/models/Book.ts` | id, userId, title, author, fileType, fileUrl, status(enum: PROCESSING/READY/ERROR), totalChapters |
-| `src/models/BookChapter.ts` | id, bookId, index, title, rawText, cleanText, fullExplanation, summary, learningMaterial(JSONB) |
-| `src/models/Section.ts` | id, chapterId, index, sectionText, explanation, concepts(JSONB), examples(JSONB), definitions(JSONB), embedding(vector(1536)) |
-| `src/models/UserBook.ts` | id, userId, bookId, currentChapterIndex, learningMode(enum:BEGINNER/STUDENT/INTERVIEW/ADVANCED), learningGoal, dailyStudyMinutes, completed, quizScores(JSONB), revisionCount, weakTopics(JSONB) |
-| `src/models/LearningSession.ts` | id, userId, bookId, chapterId, duration(seconds), type(enum:LESSON/QUIZ/REVISION/CHAT) |
-| `src/models/Quiz.ts` | id, bookId, chapterId, type(enum:MCQ/SHORT_ANSWER/CODING/SCENARIO), questions(JSONB) |
-| `src/models/QuizAttempt.ts` | id, userId, quizId, score, totalQuestions, answers(JSONB), feedback(JSONB), weakTopics(JSONB), strongTopics(JSONB) |
-| `src/models/Flashcard.ts` | id, userId, bookId, chapterId, front, back, difficulty, learningState(enum:NEW/LEARNING/REVIEW) |
-| `src/models/FlashcardReview.ts` | id, flashcardId, easeFactor, interval, repetitions, nextReviewAt |
-| `src/models/ConversationMessage.ts` | id, userId, bookId, chapterId, role(enum:USER/AI), content, metadata(JSONB) |
-| `src/models/UserNote.ts` | id, userId, bookId, chapterId, content, type(enum:NOTE/HIGHLIGHT/BOOKMARK), pageRef(string) |
-| `src/models/ProcessingJob.ts` | id, bookId, type(enum:PDF_PROCESSING), status(enum:QUEUED/PROCESSING/COMPLETED/FAILED), progress(int), error(text), pgBossJobId(string), startedAt, completedAt |
-
-All models use: UUID PK, timestamps, proper FK with CASCADE, and indexes.
-
-### Files to DELETE
-
-- `models/AIQuestion.ts`
-
-### Files to MODIFY
-
-| File | Changes |
-|------|---------|
-| `src/lib/db/init.ts` | Import 13 models. Add all associations. Remove AIQuestion |
-| `src/lib/db/sequelize.ts` | Ensure no `sync({ alter: true })` — migrations only |
-
-### Migration: `src/migrations/20260607121600-create-learning-platform.js`
-
-```
-up:
-1. CREATE EXTENSION IF NOT EXISTS vector
-2. DROP TABLE IF EXISTS revision_schedules, ai_questions CASCADE
-3. CREATE TABLE books (...)
-4. CREATE TABLE book_chapters (...)
-5. CREATE TABLE book_sections (id UUID, chapterId UUID, index INT, sectionText TEXT, explanation TEXT, concepts JSONB, examples JSONB, definitions JSONB, embedding vector(1536))
-6. CREATE TABLE user_books (...) + quizScores, revisionCount, weakTopics
-7. CREATE TABLE learning_sessions (...)
-8. CREATE TABLE quizzes (...)
-9. CREATE TABLE quiz_attempts (...)
-10. CREATE TABLE flashcards (...) + learningState
-11. CREATE TABLE flashcard_reviews (...)
-12. CREATE TABLE conversation_messages (...)
-13. CREATE TABLE user_notes (...)
-14. CREATE TABLE processing_jobs (...)
-All with proper FK, indexes, enums
-```
-
-### Model Associations (in `init.ts`)
-
-```
-User ──hasMany──> Book, UserBook, LearningSession, QuizAttempt, Flashcard, ConversationMessage, UserNote
-Book ──belongsTo──> User
-Book ──hasMany──> BookChapter, Quiz, UserBook, ProcessingJob
-BookChapter ──belongsTo──> Book
-BookChapter ──hasMany──> Section, LearningSession, Quiz, Flashcard, UserNote
-Section ──belongsTo──> BookChapter
-UserBook ──belongsTo──> User, Book
-Quiz ──belongsTo──> Book, BookChapter
-QuizAttempt ──belongsTo──> User, Quiz
-Flashcard ──belongsTo──> User, Book, BookChapter
-FlashcardReview ──belongsTo──> Flashcard
-ConversationMessage ──belongsTo──> User, Book, BookChapter
-UserNote ──belongsTo──> User, Book, BookChapter
-LearningSession ──belongsTo──> User, Book, BookChapter
-ProcessingJob ──belongsTo──> Book
-```
-
-### Test & Verify (Strong Rule)
-
-| # | Test | How |
-|---|------|-----|
-| 1 | `npm run db:migrate` exits with code 0 | Run command, check exit code |
-| 2 | All 13 tables exist | `psql` or Supabase table editor |
-| 3 | book_sections has vector column | `SELECT embedding FROM book_sections LIMIT 1` |
-| 4 | revision_schedules and ai_questions gone | `\dt revision_schedules` → error |
-| 5 | pgvector extension exists | `SELECT * FROM pg_extension WHERE extname='vector'` |
-| 6 | Models load without error | `npm run dev` → no import errors |
-| 7 | `npx tsc --noEmit` passes | No TypeScript errors |
-
----
-
-## Phase 3: Types & Validators
-
-**Goal:** Create domain-specific types and validators. Keep revision / weak-topics types.
-
-### Files to CREATE
-
-| File | Contents |
-|------|----------|
-| `src/types/book.ts` | Book, BookStatus, BookChapter |
-| `src/types/chapter.ts` | Section, SectionExplanation, VerificationResult, LearningContent |
-| `src/types/quiz.ts` | Quiz, QuizAttempt, QuestionType, RevisionSchedule |
-| `src/types/flashcard.ts` | Flashcard, FlashcardReview, SpacedRepetition |
-| `src/types/note.ts` | UserNote, NoteType |
-| `src/types/search.ts` | SearchQuery, SearchResult, SectionSearchResult |
-| `src/types/queue.ts` | ProcessingJob, JobStatus, BookProcessingJobData |
-| `src/types/index.ts` | Re-exports all domain types + shared types |
-
-| File | Schemas |
-|------|---------|
-| `src/validations/auth.ts` | LoginSchema, RegisterSchema |
-| `src/validations/book.ts` | UploadBookSchema |
-| `src/validations/quiz.ts` | GenerateQuizSchema, QuizSubmitSchema |
-| `src/validations/note.ts` | CreateNoteSchema |
-| `src/validations/flashcard.ts` | ReviewFlashcardSchema |
-| `src/validations/search.ts` | BookSearchSchema, NoteSearchSchema |
-
-### Test & Verify
-
-| # | Test | How |
-|---|------|-----|
-| 1 | `npx tsc --noEmit` passes | No type errors |
-| 2 | Revision and Section types referenced correctly | `rg "Section\|Revision" src/types/` shows valid structures |
-| 3 | New validators parse correctly | Validate sample data with Zod → success/failure expected |
-
----
-
-## Phase 4: Upload & AI Processing Pipeline
-
-**Goal:** Upload files → Store PDF → Create record → Background job (PG-Boss) → Stage 1 (Extract & Clean) → Stage 2 (Logical splitting & Section AI gen & Verification) → Stage 3 (Generate learning content).
-
-Key changes from original plan:
-- Extract + Clean + Detect Chapters moved from API route to background worker → **API returns immediately** (<1s)
-- Worker is **idempotent** — on crash/restart, skips already-completed chapters by checking `BookChapter.fullExplanation`
-- **Percentage progress** tracked per stage: extract(10%) → clean(5%) → detect chapters(5%) → AI pipeline(60%) → finalize(20%)
-
-### Files to CREATE
-
-| File | Purpose |
-|------|---------|
-| `src/features/books/services/BookUploadService.ts` | Validates file → uploads to Supabase Storage → creates Book (status: PROCESSING) → creates ProcessingJob → publishes PG-Boss job → returns immediately |
-| `src/features/ai/services/SectionSplitter.ts` | AI call: split cleaned chapter content into logical semantic sections (Introduction, Concepts, Summary) — NOT 500-word chunks |
-| `src/features/ai/services/ExplanationGenerator.ts` | AI call per section: generate { explanation, concepts[], definitions{}, examples[], formulas[], keywords[], commonMistakes[], memoryTips[] } |
-| `src/features/ai/services/VerificationService.ts` | AI call: compare original chapter vs generated explanation. Checks 8 categories. If missing → AI regenerates only missing parts → appends to form Final Verified Chapter Explanation |
-| `src/features/ai/services/ContentGenerator.ts` | AI call: from final verified explanation, generate 17-point learning material (beginner explanation, MCQs, coding tasks, interview questions, etc.) |
-| `src/workers/bookProcessingWorker.ts` | PG-Boss `'book-processing'` handler. Handles full pipeline: extract → clean → detect chapters → AI per chapter → finalize. Idempotent (skips done chapters). Updates progress after each stage. |
-
-### Files to MODIFY
-
-| File | Changes |
-|------|---------|
-| `src/lib/text-extraction.ts` | Update to use **MuPDF.js** (`@mupdf/mupdf`) to extract page text from PDF, preserving reading order, paragraphs, headings, and tables. Also handle epub (epub-parser), docx (mammoth), and md. |
-| `src/lib/embeddings.ts` | Update to generate embeddings for **individual Sections** (`sectionText + explanation`), not full chapters. Stores vector in `book_sections.embedding`. |
-| `src/validations/book.ts` | Add file validation schema: allowed types (pdf/epub/docx/md), max file size. |
-
-### API Route to CREATE
-
-| Route | Method | Description |
-|-------|--------|-------------|
-| `src/app/api/books/upload/route.ts` | POST | Receives file + metadata → calls `BookUploadService` → returns `{ bookId, status: "PROCESSING" }` in <1s |
-
-### Progress Mapping
-
-| Stage | % Range | Updated By |
-|-------|---------|------------|
-| Extracting text | 0–10 | Worker |
-| Cleaning text | 10–15 | Worker |
-| Detecting chapters | 15–20 | Worker |
-| Processing each chapter (AI pipeline) | 20–80 | Worker (60/N per chapter) |
-| Generating embeddings | 80–90 | Worker (per section, included in chapter processing) |
-| Finalizing (Book.status=READY, UserBook) | 90–100 | Worker |
-
-### Crash / Recovery Handling
-
-| Scenario | Handling |
-|----------|----------|
-| Worker crashes mid-chapter | PG-Boss re-enqueues job after keepAlive timeout. Worker re-fetches bookId from ProcessingJob. |
-| Restart re-processes from chapter 1 | **No** — worker checks `BookChapter.findOne({ where: { bookId, index } })` and skips if `fullExplanation` exists. Only unprocessed chapters run through AI. |
-| Repeated failures | After `retryLimit: 2`, PG-Boss stops. `ProcessingJob.status = FAILED`, `Book.status = ERROR`. |
-
-### Upload Flow (Immediate Response)
-
-```
-POST /api/books/upload
-  1. Receive file + metadata → validate type (pdf/epub/docx/md) + size
-  2. Upload to Supabase Storage bucket `book-uploads/{userId}/{bookId}/{filename}`
-  3. Create Book record (status: PROCESSING, totalChapters: 0)
-  4. Create ProcessingJob record (status: QUEUED, progress: 0)
-  5. Publish PG-Boss job: boss.send('book-processing', { bookId }, { retryLimit: 2, retryDelay: 60 })
-     → Update ProcessingJob.pgBossJobId
-  6. Return { bookId, status: "PROCESSING" }   ← IMMEDIATE (<1s)
-```
-
-### Background Worker Flow (With Extraction + Idempotent + Progress)
-
-```
-boss.work('book-processing', async (job) => {
-  const { bookId } = job.data;
-  const processingJob = await ProcessingJob.findOne({ where: { pgBossJobId: job.id } });
-  processingJob.update({ status: PROCESSING, startedAt: new Date() });
-
-  // ── Stage 1: Extract (10%) ──
-  processingJob.update({ progress: 5 });
-  const fileBuffer = await supabase.storage.download(book.fileUrl);
-  const rawText = extractText(fileBuffer, book.fileType);   // MuPDF.js / mammoth / epub-parser
-  processingJob.update({ progress: 10 });
-
-  // ── Stage 2: Clean (5%) ──
-  const cleanText = cleanText(rawText);   // strip headers/footers/page numbers, normalize spacing
-  processingJob.update({ progress: 15 });
-
-  // ── Stage 3: Detect Chapters (5%) ──
-  const chapters = detectChapters(cleanText);   // TOC detection / heading detection
-  processingJob.update({ progress: 20 });
-  Book.update({ totalChapters: chapters.length });
-
-  // ── Stage 4: Process Each Chapter (60% total, 60/N each) ──
-  for (let i = 0; i < chapters.length; i++) {
-    // IDEMPOTENT: skip if already processed (crash recovery)
-    const existing = await BookChapter.findOne({ where: { bookId, index: i } });
-    if (existing?.fullExplanation) {
-      const pct = 20 + ((i + 1) / chapters.length) * 60;
-      processingJob.update({ progress: Math.round(pct) });
-      continue;
+  for (const provider of selectProviders(prompt)) {
+    try {
+      const raw = await withLimit(provider, () => provider.chat(prompt));
+      const parsed = schema.parse(raw); // throws → next provider
+      await AICache.create({ hash: key, modelId: provider.name, modelVersion: opts?.modelVersion ?? "v1", response: parsed });
+      return parsed;
+    } catch (e) {
+      recordFailure(provider);
     }
-
-    const chapter = chapters[i];
-    // 4a. SectionSplitter.split() → logical sections
-    const sections = await SectionSplitter.split(chapter.content);
-    // 4b. For each section: ExplanationGenerator.generate() → save section + embedding
-    for (const section of sections) {
-      const explanation = await ExplanationGenerator.generate(section.text);
-      const embedding = await generateEmbedding(section.text + explanation.explanation);
-      await Section.create({
-        chapterId: savedChapter.id, index: section.index,
-        sectionText: section.text, explanation: explanation.explanation,
-        concepts: explanation.concepts, examples: explanation.examples,
-        definitions: explanation.definitions, embedding
-      });
-    }
-    // 4c. Combine all section explanations
-    const rawExplanation = sections.map(s => s.explanation).join('\n');
-    // 4d. VerificationService.verify() → check 8 missing categories
-    const verified = await VerificationService.verify(chapter.content, rawExplanation);
-    // 4e. ContentGenerator.generate() → 17-point learning material
-    const content = await ContentGenerator.generate(verified.finalExplanation);
-    // 4f. Save BookChapter
-    await BookChapter.create({
-      bookId, index: i, title: chapter.title,
-      rawText: chapter.content, cleanText: chapter.content,
-      fullExplanation: verified.finalExplanation, summary: content.chapterSummary,
-      learningMaterial: content
-    });
-    const pct = 20 + ((i + 1) / chapters.length) * 60;
-    processingJob.update({ progress: Math.round(pct) });
   }
-
-  // ── Stage 5: Finalize (20%) ──
-  await Book.update({ status: READY, totalChapters: chapters.length });
-  await UserBook.create({ userId: book.userId, bookId, currentChapterIndex: 0 });
-  processingJob.update({ status: COMPLETED, progress: 100, completedAt: new Date() });
-  await job.done();
-});
+  throw new Error("All AI providers failed");
+}
 ```
 
-### Test & Verify (Strong Rule)
-
-| # | Test | How |
-|---|------|-----|
-| 1 | Upload PDF via curl returns immediately | `curl -X POST -F "file=@test.pdf" http://localhost:3000/api/books/upload` → `{ bookId, status: "PROCESSING" }` in <1s |
-| 2 | MuPDF.js preserves tables | Check console logs during extraction or inspect db |
-| 3 | Job enqueued and processed | Worker starts, extracts, cleans, splits into sections, runs verification, saves |
-| 4 | Book transitions PROCESSING→READY | Poll `GET /api/books/{id}` until READY |
-| 5 | Sections have embeddings | `SELECT embedding FROM book_sections LIMIT 1` returns vectors |
-| 6 | Verification appends missing | Verify verification loops work by inserting an artificial gap |
-| 7 | Progress percentage increases | Poll `ProcessingJob.progress` → goes from 0 to 100 |
-| 8 | Worker crash + restart resumes | Kill worker mid-chapter, restart → skips completed chapters, processes remaining |
-| 9 | `npx tsc --noEmit` passes | No errors |
-
----
-
-## Phase 5: AI Teaching Engine (RAG & Section Search)
-
-**Goal:** Chat with AI tutor using section-level vector search context (RAG) and active chapter references.
-
-### Files to CREATE
-
-| File | Purpose |
-|------|---------|
-| `src/features/ai/services/ChatService.ts` | Context assembly: system prompt + relevant section texts + current chapter summary + conversation history + weak topics → call Gemini → stream |
-| `src/services/SearchService.ts` | Semantic search on **`book_sections`** via pgvector (vector match) |
-| `src/services/ProgressService.ts` | Get/update current chapter, mark complete, track sessions |
-| `src/features/notes/services/NoteSearchService.ts` | Search notes by text content |
-
-### Repositories to CREATE
-
-| File | Data Access For |
-|------|----------------|
-| `src/repositories/ChapterRepository.ts` | book_chapters |
-| `src/repositories/SectionRepository.ts` | book_sections |
-| `src/repositories/UserBookRepository.ts` | user_books |
-| `src/repositories/ConversationRepository.ts` | conversation_messages |
-
-### API Routes to CREATE
-
-| Route | Method | Handler calls |
-|-------|--------|---------------|
-| `src/app/api/learn/[bookId]/chat/route.ts` | POST | ChatService.chat() → streams response |
-| `src/app/api/learn/[bookId]/progress/route.ts` | GET, PUT | ProgressService |
-| `src/app/api/learn/[bookId]/search/route.ts` | POST | SearchService.search() |
-
-### RAG Flow & Source Citation
-
-```
-User: "What is Polymorphism?"
-  1. Retrieve vector embedding for user query
-  2. Query book_sections for top cosine matches
-  3. Send ONLY relevant sections to Gemini
-  4. System prompt enforces:
-     - Provide answers derived only from the relevant text
-     - Cite source explicitly: [Chapter X, Section Y, Example Z]
+`AICache` model:
+```typescript
+{
+  hash: STRING PK,
+  modelId: STRING,
+  modelVersion: STRING,
+  response: JSONB,
+  createdAt: DATE,
+}
 ```
 
 ---
 
-## Phase 6: Assessment & Memory System (With Revision Mode)
+### Phase 4 — Providers (Groq + DeepSeek)
+**New files:** `src/lib/ai/providers/GroqProvider.ts`, `src/lib/ai/providers/DeepSeekProvider.ts`
+**Edit:** `src/lib/ai/registry.ts`
 
-**Goal:** Dynamic interactive practice, quiz grading, SM-2 flashcard reviews, and revision mode.
+Both implement the existing `AIProvider` interface (`chat`, `chatStream`, `generateEmbedding`, `name`).
 
-### Files to CREATE
-
-| File | Purpose |
-|------|---------|
-| `src/features/quizzes/services/QuizService.ts` | Generate quiz, submit, grade via AI |
-| `src/features/ai/services/QuizGradingService.ts` | AI call: grade short answers/assignments → scores, feedback, weak topics |
-| `src/features/notes/services/NoteService.ts` | Note CRUD |
-| `src/services/FlashcardService.ts` | Generate flashcards, list due, SM-2 reviews |
-| `src/lib/spaced-repetition.ts` | SM-2 algorithm: `calculateNextReview(quality, repetitions, easeFactor)` |
-| `src/services/RevisionService.ts` | Analyze weak topics, generate revision quizzes, and daily reviews |
-
-### Repositories to CREATE
-
-| File | Data Access For |
-|------|----------------|
-| `src/repositories/QuizRepository.ts` | quizzes |
-| `src/repositories/QuizAttemptRepository.ts` | quiz_attempts |
-| `src/repositories/FlashcardRepository.ts` | flashcards |
-| `src/repositories/FlashcardReviewRepository.ts` | flashcard_reviews |
-| `src/repositories/NoteRepository.ts` | user_notes |
-
-### API Routes to CREATE
-
-| Route | Method | Handler calls |
-|-------|--------|---------------|
-| `src/app/api/learn/[bookId]/quiz/generate/route.ts` | POST | QuizService.generate() |
-| `src/app/api/learn/[bookId]/quiz/submit/route.ts` | POST | QuizService.submit() |
-| `src/app/api/learn/[bookId]/revision/generate/route.ts` | POST | RevisionService.generate() |
-| `src/app/api/learn/[bookId]/flashcards/route.ts` | GET, POST | FlashcardService |
-| `src/app/api/learn/[bookId]/flashcards/review/route.ts` | POST | FlashcardService.review() |
+- `GroqProvider` → model `llama-3.3-70b-versatile`, reads `GROQ_API_KEY`.
+- `DeepSeekProvider` → model `deepseek-chat`, reads `DEEPSEEK_API_KEY`.
+- `GeminiProvider` → already exists; keep as fallback.
+- Registry: register all three constructors so the router can instantiate by name.
 
 ---
 
-## Phase 7: UI Pages
+### Phase 5 — Output validation (Zod)
+**Edit:** `src/features/ai/services/*.ts`
 
-**Goal:** Build responsive frontends including side-by-side study modes, interactive practice wizards, and a full revision dashboard.
+Add Zod schemas and validate AI output before using/storing:
 
-### Pages to CREATE (7 files)
+| Service | Schema (fields) |
+|---------|-----------------|
+| `SectionSplitter` | `array({ title: string, text: string })` |
+| `ExplanationGenerator` | `{ explanation, concepts[], definitions{}, examples[], formulas[], keywords[], commonMistakes[], memoryTips[] }` |
+| `VerificationService` | `{ isComplete: bool, missingItems[], finalExplanation: string }` |
+| `ContentGenerator` | 17-field learning schema (beginnerExplanation, detailedExplanation, keyConcepts[], flashcards[], mcqs[], shortAnswerQuestions[], etc.) |
 
-| File | Key Features |
-|------|-------------|
-| `src/app/(dashboard)/library/page.tsx` | Grid of BookCards, progress trackers, "Continue" triggers |
-| `src/app/(dashboard)/upload/page.tsx` | Drag-drop, validation badges, file upload progress with clean/detect state triggers |
-| `src/app/(dashboard)/learn/[bookId]/page.tsx` | Split screen: Left = Chapter content markdown + sections list, Right = AI Tutor chat |
-| `src/app/(dashboard)/learn/[bookId]/practice/page.tsx` | Interactive practice wizard (Detailed Explanation → MCQs with feedback/hints → Short Answer → Assignment reviews) |
-| `src/app/(dashboard)/learn/[bookId]/flashcards/page.tsx` | Spaced repetition cards with 3D flip animation, ease scoring buttons, and stats |
-| `src/app/(dashboard)/learn/[bookId]/notes/page.tsx` | Create, read, delete notes grouped by chapter, with search |
-| `src/app/(dashboard)/learn/[bookId]/revision/page.tsx` | Revision mode dashboard showing overall weak topics, daily goals, flashcard review lists, and revision quiz triggers |
+Each service replaces `getProvider().chat()` with `routeAI(prompt, schema)` and removes its own ad-hoc JSON parsing/fallback (the router handles fallback + validation).
 
-### Components to CREATE (8 files)
-
-| File | Purpose |
-|------|---------|
-| `src/components/learn/ChapterContent.tsx` | Chapter navigation, detailed section rendering, math formulas, code highlight |
-| `src/components/learn/AIChat.tsx` | Streaming responses, cite reference badges, follow-up query suggestions |
-| `src/components/learn/LearningModeSelector.tsx` | Beginner, Student, Interview, Advanced selection |
-| `src/components/learn/QuizCard.tsx` | MCQs with hints, short answers, assignments input. Shows step-by-step evaluations |
-| `src/components/learn/Flashcard.tsx` | 3D Flippable cards with scoring interactions |
-| `src/components/learn/ProgressBar.tsx` | Progress bar and quiz stats |
-| `src/components/learn/BookCard.tsx` | Standard book rendering with custom cover placeholders |
-| `src/components/learn/FileUploader.tsx` | Custom file drop & validation container |
-
-### Files to MODIFY
-
-- `src/components/common/Sidebar.tsx` (Sidebar links)
-- `src/components/common/Navbar.tsx` (Header content)
-- `src/app/layout.tsx` (Platform title & global layouts)
+Also in this phase:
+- Raise `maxOutputTokens` to **8192+** (current 4096 truncates learning material).
+- Lower `temperature` to **0.2–0.3** for consistent explanations.
 
 ---
 
-## Phase 8: Dashboard & Final Integration
+### Phase 6 — API endpoint (on-demand trigger)
+**New file:** `src/app/api/books/[id]/chapters/[index]/route.ts`
 
-**Goal:** Unified overview stats, streak trackers, weak topics feed, activity logging, and end-to-end testing.
+```typescript
+GET → load BookChapter by { bookId, index }
+  if completed → return { status: "completed", title, content, fullExplanation, summary, learningMaterial }
+  if pending   → queue BOOK_PROCESS_CHAPTER, set status "processing", return { status: "generating" }
+  if processing→ return { status: "generating" }
+  if failed    → return { status: "failed", error }
+```
 
-### Files to CREATE/MODIFY
+Frontend polls this endpoint every ~2s while "generating".
 
-- `src/app/(dashboard)/dashboard/page.tsx` (Dashboard landing: active book, daily goals, weak topics alerts, practice streak)
-- `src/components/learn/DashboardStats.tsx` (Grid of analytics)
+---
 
-### End-to-End Test (Strong Rule)
+### Phase 7 — Worker refactor for BOOK_PROCESS_CHAPTER
+**Edit:** `src/workers/bookProcessingWorker.ts` (`handleChapterProcess`)
+
+- Call AI services (which now use the router) — no direct `getProvider()`.
+- **Remove** the old `withRetry`/`withTimeout` helpers (router owns retry).
+- **Drop embeddings** — do NOT call `generateSectionEmbedding`; do NOT populate `Section.embedding`.
+- Save `Section` rows without `embedding` (keep `sectionText`, `explanation`, `concepts`, `examples`, `definitions`).
+- On any thrown error → set `BookChapter.status = "failed"` and rethrow so pg-boss retries the job (up to 3× with backoff).
+
+---
+
+### Phase 8 — Config & environment
+**Edit:** `.env`, `src/lib/ai/config.ts` (or constants)
 
 ```
-1. Register a new user
-2. Upload a small PDF
-3. Background worker extracts (MuPDF.js), splits logically, verifies content, generates learning contents, saves section embeddings
-4. Library shows Book with "Continue"
-5. Open Book → Split view: left = text, right = chat
-6. Chat: "Explain polymorphism" → Uses Section pgvector → Answers with [Chapter 1, Section 1] references
-7. Click "Practice" → Detailed explanation, MCQs with hints/grading, Short-answers, Assignment grading
-8. Generate Flashcards → Flashcard flips and review schedules with SM-2
-9. Mark Chapter 1 complete → updates weak/strong topics & revision mode daily queue
-10. Dashboard shows weak topics and daily review alerts
+GROQ_API_KEY=...
+DEEPSEEK_API_KEY=...
+GEMINI_API_KEY=...   (already present)
+AI_PRIMARY_MODEL=groq
+GROQ_RATE_LIMIT=25
+DEEPSEEK_RATE_LIMIT=20
+GEMINI_RATE_LIMIT=4
+AI_OUTPUT_TOKENS=8192
+AI_TEMPERATURE=0.25
+CONTEXT_FALLBACK_THRESHOLD_TOKENS=128000
 ```
 
 ---
 
-## Summary: All Files Changed
+## 5. Edge Cases & Decisions Log
 
-| Phase | Create | Modify | Delete | Strong Rule |
-|-------|--------|--------|--------|-------------|
-| P0: Restructure | 4 | 2 | 1 | `npm run dev` starts, TS passes |
-| P1: Foundation | 12 | 1 | 0 | AI provider responds, PG-Boss connects |
-| P2: Database | 13 | 2 | 1 | Migration succeeds, all tables exist |
-| P3: Types | 12 | 0 | 3 | TypeScript passes, revision and sections validated |
-| P4: Upload | 7 | 3 | 0 | Upload → immediate response, background job → READY with progress % |
-| P5: AI Engine | 8 | 0 | 0 | Chat responds using section vector matches |
-| P6: Assessment | 12 | 0 | 0 | Quiz grades, revision analyzes, SM-2 works |
-| P7: UI Pages | 15 | 3 | 0 | All pages render, responsive, interactive flows |
-| P8: Dashboard | 1 | 2 | 0 | Full end-to-end flow passes |
-| **Total** | **83** | **12** | **5** | |
+| Decision | Rationale |
+|----------|-----------|
+| Lazy/on-demand AI | Book ready in 5s; AI cost ∝ actual usage |
+| Drop embeddings | Fewer AI calls; no semantic search needed yet |
+| Single worker | Simplest; in-memory rate limiter suffices |
+| Cache key includes modelVersion | Avoids serving stale outputs after model upgrade |
+| PostgreSQL cache (not Redis) | Fewer services; `ai_cache` table is enough |
+| `ai_cache` optional for cross-book dedupe | Per-book cache = BookChapter/Section rows themselves |
+| Provider chain Groq→DeepSeek→Gemini | Best free throughput → best coding → largest context |
+| `maxOutputTokens` 8192+ | 4096 truncated full learning material |
+| Temperature 0.2–0.3 | Consistent explanations for a learning app |
+
+---
+
+## 6. Production-Readiness Scorecard
+
+| Dimension | Status |
+|-----------|--------|
+| Cost control | ✅ Cache + free models + rate limiting |
+| Reliability | ✅ Multi-provider fallback + Zod validation + retries |
+| Speed | ✅ Lazy trigger + Groq fast inference |
+| Scalability | ✅ Queue-based; horizontal later via shared limiter |
+| Quality | ✅ Zod validation + verifyContent step |
+| Observability | ⚠️ Add basic counters later (cache hit %, AI calls/provider) |
+
+---
+
+## 7. Implementation Order (recommended)
+
+1. Phase 1 (BookChapter.status) — unblocks everything
+2. Phase 2 (two-queue worker) — extraction works end-to-end, book becomes READY
+3. Phase 6 (API endpoint) — manual test: book ready, chapter returns "generating"
+4. Phase 3 (AI Router) — core intelligence
+5. Phase 4 (Groq + DeepSeek providers) — routing works
+6. Phase 5 (Zod validation + service refactor) — quality + safety
+7. Phase 7 (worker refactor, drop embeddings) — wire it together
+8. Phase 8 (config/env) — finalize
+
+> Tell me which phase(s) to implement, or say "implement all" to proceed end-to-end.

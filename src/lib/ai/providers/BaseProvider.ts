@@ -1,21 +1,44 @@
-import type { AIProvider, AIProviderConfig, AIChatRequest, AIChatResponse } from "../types";
+import type {
+  AIProvider,
+  AIProviderConfig,
+  AIChatMessage,
+  AIChatRequest,
+  AIChatResponse,
+  ProviderId,
+} from "../types";
 
 export abstract class BaseAIProvider implements AIProvider {
   protected config: AIProviderConfig;
 
+  abstract readonly id: ProviderId;
+
   constructor(config: AIProviderConfig) {
     this.config = {
-      temperature: 0.7,
-      maxTokens: 4096,
-      model: this.getDefaultModel(),
+      temperature: 0.25,
+      maxTokens: 8192,
       ...config,
     };
   }
 
-  abstract readonly name: string;
-  protected abstract getDefaultModel(): string;
-
   abstract chat(req: AIChatRequest): Promise<AIChatResponse>;
-  abstract chatStream(req: AIChatRequest): AsyncIterable<string>;
-  abstract generateEmbedding(text: string): Promise<number[]>;
+
+  protected buildMessages(req: AIChatRequest): Array<{
+    role: "system" | "user" | "assistant";
+    content: string;
+  }> {
+    const messages: Array<{
+      role: "system" | "user" | "assistant";
+      content: string;
+    }> = [];
+
+    if (req.systemPrompt) {
+      messages.push({ role: "system", content: req.systemPrompt });
+    }
+
+    for (const m of req.messages) {
+      messages.push({ role: m.role, content: m.content });
+    }
+
+    return messages;
+  }
 }

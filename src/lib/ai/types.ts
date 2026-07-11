@@ -1,8 +1,13 @@
+import type { ProviderId } from "./config";
+
+export type { ProviderId };
+
 export interface AIProviderConfig {
   apiKey: string;
   model?: string;
   temperature?: number;
   maxTokens?: number;
+  baseURL?: string;
 }
 
 export interface AIChatMessage {
@@ -13,6 +18,8 @@ export interface AIChatMessage {
 export interface AIChatRequest {
   messages: AIChatMessage[];
   systemPrompt?: string;
+  temperature?: number;
+  maxTokens?: number;
   stream?: boolean;
 }
 
@@ -25,10 +32,7 @@ export interface AIChatResponse {
 }
 
 export interface AIProvider {
+  readonly id: ProviderId;
   chat(req: AIChatRequest): Promise<AIChatResponse>;
-  chatStream(req: AIChatRequest): AsyncIterable<string>;
-  generateEmbedding(text: string): Promise<number[]>;
-  readonly name: string;
+  chatStream?(req: AIChatRequest): AsyncIterable<string>;
 }
-
-export type ProviderName = "gemini" | "openai" | "claude";

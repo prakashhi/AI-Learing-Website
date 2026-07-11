@@ -11,6 +11,7 @@ import FlashcardReview from "@/models/FlashcardReview";
 import ConversationMessage from "@/models/ConversationMessage";
 import UserNote from "@/models/UserNote";
 import ProcessingJob from "@/models/ProcessingJob";
+import AICache from "@/models/AICache";
 
 export function initializeModels() {
   User.hasMany(Book, { foreignKey: "userId", onDelete: "CASCADE" });
@@ -81,4 +82,5 @@ export {
   ConversationMessage,
   UserNote,
   ProcessingJob,
+  AICache,
 };

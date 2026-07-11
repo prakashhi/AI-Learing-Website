@@ -11,6 +11,8 @@ export class BookChapter extends Model {
   public fullExplanation!: string;
   public summary!: string;
   public learningMaterial!: any;
+  public status!: "PENDING" | "PROCESSING" | "COMPLETED" | "FAILED";
+  public error!: string;
 }
 
 BookChapter.init(
@@ -50,6 +52,15 @@ BookChapter.init(
     },
     learningMaterial: {
       type: DataTypes.JSONB,
+      allowNull: true,
+    },
+    status: {
+      type: DataTypes.ENUM("PENDING", "PROCESSING", "COMPLETED", "FAILED"),
+      defaultValue: "PENDING",
+      allowNull: false,
+    },
+    error: {
+      type: DataTypes.TEXT,
       allowNull: true,
     },
   },

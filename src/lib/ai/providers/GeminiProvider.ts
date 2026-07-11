@@ -1,18 +1,14 @@
 import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from "@google/generative-ai";
 import { BaseAIProvider } from "./BaseProvider";
-import type { AIChatRequest, AIChatResponse } from "../types";
+import type { AIChatRequest, AIChatResponse, ProviderId } from "../types";
 
 export class GeminiProvider extends BaseAIProvider {
-  readonly name = "gemini";
+  readonly id: ProviderId = "gemini";
   private client: GoogleGenerativeAI;
 
   constructor(apiKey: string) {
-    super({ apiKey });
+    super({ apiKey, model: "gemini-2.5-flash" });
     this.client = new GoogleGenerativeAI(apiKey);
-  }
-
-  protected getDefaultModel(): string {
-    return "gemini-2.5-flash";
   }
 
   private getModel() {
@@ -58,12 +54,6 @@ export class GeminiProvider extends BaseAIProvider {
       const text = chunk.text();
       if (text) yield text;
     }
-  }
-
-  async generateEmbedding(text: string): Promise<number[]> {
-    const model = this.client.getGenerativeModel({ model: "text-embedding-004" });
-    const result = await model.embedContent(text);
-    return result.embedding.values;
   }
 
   private buildContents(req: AIChatRequest) {
