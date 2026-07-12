@@ -165,7 +165,7 @@ export default function LoginPage() {
 
   return (
     <motion.div
-      variants={pageVariants}
+      // variants={pageVariants}
       initial="initial"
       animate="animate"
       exit="exit"

@@ -14,7 +14,11 @@ export function getQueue(): PgBoss {
 }
 
 export async function startQueue(): Promise<void> {
-  await getQueue().start();
+  try {
+    await getQueue().start();
+  } catch (e) {
+    console.log(e);
+  }
 }
 
 export async function stopQueue(): Promise<void> {

@@ -43,8 +43,14 @@ export class QueueService {
   async process<Req = any, Res = any>(
     queue: string,
     handler: (jobs: import("pg-boss").Job<Req>[]) => Promise<Res>,
+    options?: Record<string, unknown>,
   ): Promise<string> {
-    return getQueue().work<Req, Res>(queue, handler);
+    const boss = getQueue();
+      await boss.createQueue(queue); 
+    if (options) {
+      return boss.work<Req, Res>(queue, options as any, handler);
+    }
+    return boss.work<Req, Res>(queue, handler);
   }
 
   async getJob<T = Record<string, unknown>>(

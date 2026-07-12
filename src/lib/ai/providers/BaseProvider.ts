@@ -1,7 +1,6 @@
 import type {
   AIProvider,
   AIProviderConfig,
-  AIChatMessage,
   AIChatRequest,
   AIChatResponse,
   ProviderId,

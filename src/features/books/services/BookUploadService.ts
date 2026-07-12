@@ -64,7 +64,7 @@ export async function uploadBook(
   });
 
   const pgBossJobId = await QueueService.getInstance().add(
-    QUEUES.BOOK_PROCESSING,
+    QUEUES.BOOK_EXTRACT,
     { bookId },
     { retryLimit: 2, retryDelay: 60, expireInSeconds: 30 },
   );

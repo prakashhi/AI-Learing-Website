@@ -1,12 +1,13 @@
 export const QUEUES = {
-  BOOK_PROCESSING: "book-processing",
+  BOOK_EXTRACT: "book-extract",
+  BOOK_PROCESS_CHAPTER: "book-process-chapter",
 } as const;
 
-export type BookProcessingData = {
+export type BookExtractData = {
   bookId: string;
-  chapters: Array<{
-    index: number;
-    title: string;
-    content: string;
-  }>;
+};
+
+export type BookProcessChapterData = {
+  bookId: string;
+  chapterIndex: number;
 };

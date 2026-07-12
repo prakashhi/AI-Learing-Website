@@ -1,18 +1,22 @@
-import { getQueue } from "@/queue/pgboss";
-import { QUEUES } from "@/queue/queues";
+import { randomUUID } from "crypto";
+import { QUEUES ,BookExtractData,BookProcessChapterData} from "@/queue/queues";
 import { extractText } from "@/lib/text-extraction";
-import sequelize from "@/lib/db/sequelize";
 import { cleanText } from "@/lib/text-cleaning";
-import { splitChapter } from "@/features/ai/services/SectionSplitter";
-import { generateExplanation } from "@/features/ai/services/ExplanationGenerator";
-import { verifyContent } from "@/features/ai/services/VerificationService";
-import { generateLearningContent } from "@/features/ai/services/ContentGenerator";
+import { SectionSplitterService } from "@/features/ai/services/SectionSplitterService";
+import { ExplanationGeneratorService } from "@/features/ai/services/ExplanationGeneratorService";
+import { VerificationService } from "@/features/ai/services/VerificationService";
+import { ContentGeneratorService } from "@/features/ai/services/ContentGeneratorService";
 import Book from "@/models/Book";
 import BookChapter from "@/models/BookChapter";
 import Section from "@/models/Section";
 import ProcessingJob from "@/models/ProcessingJob";
 import UserBook from "@/models/UserBook";
+import sequelize from "@/lib/db/sequelize";
 import { SuperBaseAdmin, STORAGE_BUCKET } from "@/lib/supabase";
+import { QueueService } from "@/services/QueueService";
+
+type ExtractJob = { id: string; data: { bookId: string } };
+type ChapterJob = { id: string; data: { bookId: string; chapterIndex: number } };
 
 async function getFileBuffer(fileUrl: string): Promise<Buffer> {
   const bucketIndex = fileUrl.indexOf(STORAGE_BUCKET);
@@ -30,228 +34,173 @@ async function getFileBuffer(fileUrl: string): Promise<Buffer> {
   return Buffer.from(arrayBuffer);
 }
 
-async function withTimeout<T>(
-  fn: () => Promise<T>,
-  timeoutMs: number,
-): Promise<T> {
-  let timer: NodeJS.Timeout;
-  const result = await Promise.race([
-    fn(),
-    new Promise<never>(
-      (_, reject) =>
-        (timer = setTimeout(
-          () => reject(new Error(`Timed out after ${timeoutMs}ms`)),
-          timeoutMs,
-        )),
-    ),
-  ]);
-  clearTimeout(timer!);
-  return result;
-}
-
-async function withRetry<T>(
-  fn: () => Promise<T>,
-  options?: { maxRetries?: number; timeoutMs?: number },
-): Promise<T> {
-  const { maxRetries = 3, timeoutMs = 30000 } = options ?? {};
-  let lastError: unknown;
-
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      return await withTimeout(fn, timeoutMs);
-    } catch (e) {
-      lastError = e;
-      if (attempt < maxRetries) {
-        const delay = Math.min(1000 * Math.pow(2, attempt), 10000);
-        await new Promise((resolve) => setTimeout(resolve, delay));
-      }
-    }
-  }
-
-  throw lastError;
-}
-
-type BookProcessingJob = {
-  data: { bookId: string };
-  id: string;
-  done: () => Promise<void>;
-};
-
-async function processBook(job: BookProcessingJob): Promise<void> {
+async function handleBookExtract(job: ExtractJob): Promise<void> {
   const { bookId } = job.data;
   const book = await Book.findByPk(bookId);
-  if (!book) {
-    throw new Error(`Book ${bookId} not found`);
-  }
+  if (!book) throw new Error(`Book ${bookId} not found`);
 
   const processingJob = await ProcessingJob.findOne({
-    where: { pgBossJobId: job.id } as any,
-  });
-  if (!processingJob) {
-    throw new Error(`ProcessingJob for job ${job.id} not found`);
-  }
-
-  await processingJob.update({
-    status: "PROCESSING",
-    startedAt: new Date(),
+    where: { pgBossJobId: job.id },
   });
 
-  // Stage 1: Extract (0-10%)
-  await processingJob.update({ progress: 5 });
+  await processingJob?.update({ status: "PROCESSING", startedAt: new Date() });
+
   const fileBuffer = await getFileBuffer(book.fileUrl);
   const extraction = await extractText(fileBuffer, book.fileType);
-  await processingJob.update({ progress: 10 });
 
-  // Stage 2: Clean chapters in-place (10-20%)
   const chapters = extraction.chapters.map((ch) => ({
-    ...ch,
-    content: cleanText(ch.content),
+    id: randomUUID(),
+    bookId,
+    index: ch.index ?? 0,
+    title: ch.title ?? `Chapter`,
+    rawText: ch.content,
+    cleanText: cleanText(ch.content),
+    status: "PENDING" as const,
+    summary: null,
+    fullExplanation: null,
+    learningMaterial: null,
   }));
-  await book.update({ totalChapters: chapters.length });
-  await processingJob.update({ progress: 20 });
 
-  // Stage 3: Process Each Chapter (20-80%)
-  const totalChapters = chapters.length;
-  let chaptersCompleted = 0;
-  const chapterErrors: Error[] = [];
-  const concurrency = 3;
+  await BookChapter.bulkCreate(chapters, { ignoreDuplicates: true });
 
-  const processOneChapter = async (chapter: typeof chapters[0], i: number) => {
-    const existing = await BookChapter.findOne({
-      where: { bookId, index: i } as any,
+  await book.update({ status: "READY", totalChapters: chapters.length });
+
+  if (!processingJob) {
+    await ProcessingJob.create({
+      id: randomUUID(),
+      bookId,
+      type: "PDF_PROCESSING",
+      status: "COMPLETED",
+      progress: 100,
+      pgBossJobId: job.id,
+      completedAt: new Date(),
     });
-    if (existing?.fullExplanation) {
-      return;
-    }
+  } else {
+    await processingJob.update({
+      status: "COMPLETED",
+      progress: 100,
+      completedAt: new Date(),
+    });
+  }
 
-    const result = await sequelize.transaction(async (tx) => {
-      const sections = await withRetry(() => splitChapter(chapter.content));
+  await UserBook.findOrCreate({
+    where: { userId: book.userId, bookId },
+    defaults: { userId: book.userId, bookId, currentChapterIndex: 0 },
+  });
+}
 
-      let combinedExplanation = "";
-      const sectionRecords: any[] = [];
+async function handleBookProcessChapter(job: ChapterJob): Promise<void> {
+  const { bookId, chapterIndex } = job.data;
 
-      for (const section of sections) {
-        const explanation = await withRetry(() =>
-          generateExplanation(section.text),
-        );
-        combinedExplanation += explanation.explanation + "\n\n";
+  const chapter = await BookChapter.findOne({
+    where: { bookId, index: chapterIndex },
+  });
+  if (!chapter) throw new Error(`Chapter ${bookId}:${chapterIndex} not found`);
+  if (chapter.status === "COMPLETED") return;
 
-        const saved = await Section.create(
-          {
-            chapterId: null,
-            index: section.index,
-            sectionText: section.text,
-            explanation: explanation.explanation,
-            concepts: explanation.concepts,
-            examples: explanation.examples,
-            definitions: explanation.definitions,
-          },
-          { transaction: tx },
-        );
-        sectionRecords.push(saved);
-      }
+  await chapter.update({ status: "PROCESSING", error: null });
 
-      const verified = await withRetry(() =>
-        verifyContent(chapter.content, combinedExplanation),
-      );
+  const content = chapter.cleanText || chapter.rawText || "";
 
-      const content = await withRetry(() =>
-        generateLearningContent(verified.finalExplanation),
-      );
+  const sections = await SectionSplitterService.getInstance().split(content);
 
-      const savedChapter = await BookChapter.create(
-        {
-          bookId,
-          index: i,
-          title: chapter.title,
-          rawText: chapter.content,
-          cleanText: chapter.content,
-          fullExplanation: verified.finalExplanation,
-          summary: content.chapterSummary,
-          learningMaterial: content,
-        },
-        { transaction: tx },
-      );
+  let combinedExplanation = "";
+  const sectionRecords: Section[] = [];
 
+  for (const section of sections) {
+    const explanation = await ExplanationGeneratorService.getInstance().generate(
+      section.text,
+    );
+    combinedExplanation += explanation.explanation + "\n\n";
+
+    const saved = await Section.create({
+      chapterId: chapter.id,
+      index: section.index,
+      sectionText: section.text,
+      explanation: explanation.explanation,
+      concepts: explanation.concepts,
+      examples: explanation.examples,
+      definitions: explanation.definitions,
+    });
+    sectionRecords.push(saved);
+  }
+
+  const verified = await VerificationService.getInstance().verify(
+    content,
+    combinedExplanation,
+  );
+
+  const learningMaterial = await ContentGeneratorService.getInstance().generate(
+    verified.finalExplanation,
+  );
+
+  await sequelize.transaction(async (tx) => {
+    await chapter.update(
+      {
+        fullExplanation: verified.finalExplanation,
+        summary: learningMaterial.chapterSummary,
+        learningMaterial,
+        status: "COMPLETED",
+        error: null,
+      },
+      { transaction: tx },
+    );
+
+    if (sectionRecords.length > 0) {
       await Section.update(
-        { chapterId: savedChapter.id },
+        { chapterId: chapter.id },
         {
-          where: { id: sectionRecords.map((s) => s.id) } as any,
+          where: { id: sectionRecords.map((s) => s.id) },
           transaction: tx,
         },
       );
-
-      return savedChapter;
-    });
-
-    if (!result) {
-      throw new Error(`Failed to process chapter ${i}`);
     }
-  };
-
-  const queue = chapters.map((ch, i) => ({ ch, i }));
-  await Promise.all(
-    Array.from({ length: Math.min(concurrency, chapters.length) }, async () => {
-      while (queue.length > 0) {
-        const entry = queue.shift();
-        if (!entry) break;
-        try {
-          await processOneChapter(entry.ch, entry.i);
-        } catch (e) {
-          chapterErrors.push(e instanceof Error ? e : new Error(String(e)));
-        }
-        chaptersCompleted++;
-        const pct =
-          20 + Math.round((chaptersCompleted / totalChapters) * 60);
-        await processingJob.update({ progress: pct }).catch(() => {});
-      }
-    }),
-  );
-
-  if (chapterErrors.length > 0) {
-    throw new AggregateError(
-      chapterErrors,
-      `${chapterErrors.length} of ${totalChapters} chapters failed`,
-    );
-  }
-
-  // Stage 4: Finalize (80-100%)
-  await book.update({ status: "READY" });
-  await UserBook.create({
-    userId: book.userId,
-    bookId,
-    currentChapterIndex: 0,
   });
-  await processingJob.update({
-    status: "COMPLETED",
-    progress: 100,
-    completedAt: new Date(),
-  });
-
-  await job.done();
 }
 
 export function startBookProcessingWorker(): void {
-  const boss = getQueue();
-  boss.createQueue(QUEUES.BOOK_PROCESSING);
+  const queue = QueueService.getInstance();
 
-  (boss.work as any)(
-    QUEUES.BOOK_PROCESSING,
-    async (jobs: BookProcessingJob[]) => {
-      for (const job of jobs) {
+  queue.process<BookExtractData>(QUEUES.BOOK_EXTRACT, async (jobs) => {
+    for (const job of jobs as ExtractJob[]) {
+      try {
+        await handleBookExtract(job);
+      } catch (e) {
+        console.error(`[extract] job ${job.id} failed:`, e);
+        await ProcessingJob.update(
+          {
+            status: "FAILED",
+            error: e instanceof Error ? e.message : String(e),
+          },
+          { where: { pgBossJobId: job.id } },
+        ).catch(() => {});
+      }
+    }
+  });
+
+  queue.process<BookProcessChapterData>(
+    QUEUES.BOOK_PROCESS_CHAPTER,
+    async (jobs) => {
+      for (const job of jobs as ChapterJob[]) {
         try {
-          await processBook(job);
+          await handleBookProcessChapter(job);
         } catch (e) {
-          console.error(`Job ${job.id} failed:`, e);
-          await ProcessingJob.update(
+          console.error(`[chapter] job ${job.id} failed:`, e);
+          await BookChapter.update(
             {
               status: "FAILED",
               error: e instanceof Error ? e.message : String(e),
             },
-            { where: { pgBossJobId: job.id } as any },
+            {
+              where: {
+                bookId: job.data.bookId,
+                index: job.data.chapterIndex,
+              },
+            },
           ).catch(() => {});
         }
       }
     },
+    { localConcurrency: 3, batchSize: 3 },
   );
 }

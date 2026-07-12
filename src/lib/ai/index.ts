@@ -4,6 +4,8 @@ export { GeminiProvider } from "./providers/GeminiProvider";
 export { GroqProvider } from "./providers/GroqProvider";
 export { DeepSeekProvider } from "./providers/DeepSeekProvider";
 export { ProviderRegistry } from "./registry/ProviderRegistry";
+export { AIRouter } from "./router/AIRouter";
+export type { AIRouterRequest, AIRouterResult } from "./router/AIRouter";
 export type {
   AIProvider,
   AIProviderConfig,

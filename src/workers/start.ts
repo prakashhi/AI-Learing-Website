@@ -5,6 +5,7 @@ import { initializeModels } from "@/lib/db/init";
 import { QueueService } from "@/services/QueueService";
 import { QUEUES } from "@/queue/queues";
 import ProcessingJob from "@/models/ProcessingJob";
+import BookChapter from "@/models/BookChapter";
 import { Op } from "sequelize";
 
 async function requeueStaleJobs() {
@@ -16,17 +17,33 @@ async function requeueStaleJobs() {
     },
   });
   for (const job of stale) {
-    console.log(job)
     const pgBossJobId = await QueueService.getInstance().add(
-      QUEUES.BOOK_PROCESSING,
+      QUEUES.BOOK_EXTRACT,
       { bookId: job.dataValues.bookId },
       { retryLimit: 2, retryDelay: 60, expireInSeconds: 30 },
     );
-    await job.update({ pgBossJobId : pgBossJobId });
+    await job.update({ pgBossJobId });
     await job.save();
   }
   if (stale.length > 0) {
-    console.log(`[worker] Re-queued ${stale.length} stale jobs`);
+    console.log(`[worker] Re-queued ${stale.length} stale extract jobs`);
+  }
+
+  const staleChapters = await BookChapter.findAll({
+    where: {
+      status: ["PENDING", "PROCESSING", "FAILED"],
+    },
+    attributes: ["bookId", "index"],
+  });
+  for (const ch of staleChapters) {
+    await QueueService.getInstance().add(
+      QUEUES.BOOK_PROCESS_CHAPTER,
+      { bookId: ch.bookId, chapterIndex: ch.index },
+      { retryLimit: 2, retryDelay: 60, expireInSeconds: 30 },
+    );
+  }
+  if (staleChapters.length > 0) {
+    console.log(`[worker] Re-queued ${staleChapters.length} stale chapter jobs`);
   }
 }
 
